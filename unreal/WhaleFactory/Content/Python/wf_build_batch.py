@@ -5,10 +5,11 @@ Render Queue renders all its shots in a single game session.
 
 The batch's shared sea state and water look are applied to the level. Each shot gets
 ``frames_per_shot`` frames and its own camera cut, so MRQ warms up per shot (exposure,
-Lumen, water) and nothing bleeds between shots. Keyed per shot, with constant
-interpolation: whale transform, camera transform, focal length, exposure bias, sun
-rotation and intensity, fog density, and the visibility of that shot's splash meshes
-(spawned hidden). tools/render_batch.sh renders the result; the last
+Lumen, water) and nothing bleeds between shots. Each shot gets its own whale actor
+(its deformed mesh from factory/deform.py, written by tools/render_batch.sh, and its skin
+material instance), shown only in its frames. Keyed per shot, with constant
+interpolation: camera transform, focal length, exposure bias, sun rotation and
+intensity, fog density, and the visibility of that shot's whale and splash meshes. tools/render_batch.sh renders the result; the last
 frame of each shot is the one to keep.
 """
 
@@ -86,6 +87,7 @@ def main() -> None:
     wf_shot.apply_ocean_look(batch["ocean"])
     wf_shot.apply_waves(batch["waves"])
     wf_shot.clear_splash()
+    wf_shot.clear_whale_variants()
 
     whale = wf_shot.find_actor(wf_shot.WHALE_LABEL)
     camera = wf_shot.find_actor(wf_shot.CAMERA_LABEL)
@@ -104,13 +106,14 @@ def main() -> None:
     sequence.set_playback_start(0)
     sequence.set_playback_end(total)
 
-    whale_binding = sequence.add_possessable(whale)
+    # Every shot gets its own whale actor (deformed mesh and skin), shown only in its frames;
+    # the base whale stays hidden for the whole batch.
+    whale.set_actor_hidden_in_game(True)
     camera_binding = sequence.add_possessable(camera)
     cine_binding = sequence.add_possessable(cine)
     sun_binding = sequence.add_possessable(sun)
     sun_light_binding = sequence.add_possessable(sun.get_component_by_class(unreal.DirectionalLightComponent))
     fog_binding = sequence.add_possessable(fog.get_component_by_class(unreal.ExponentialHeightFogComponent))
-    whale_channels = add_transform_track(sequence, whale_binding, total)
     camera_channels = add_transform_track(sequence, camera_binding, total)
     sun_channels = add_transform_track(sequence, sun_binding, total)
     focal = add_float_track(cine_binding, "CurrentFocalLength", total)
@@ -123,7 +126,11 @@ def main() -> None:
     sprite_total = 0
     for index, shot in enumerate(shots):
         start = index * per_shot
-        key_transform(whale_channels, start, shot["whale"]["location"], shot["whale"]["rotation"])
+        variant = wf_shot.spawn_whale_variant(shot, shot["id"], hidden=True)
+        whale_visibility = add_visibility_track(sequence.add_possessable(variant), total)
+        whale_visibility.add_key(frame(0), False)
+        whale_visibility.add_key(frame(start), True)
+        whale_visibility.add_key(frame(start + per_shot), False)
         key_transform(camera_channels, start, shot["camera"]["location"], shot["camera"]["rotation"])
         key_transform(sun_channels, start, [0.0, 0.0, 1000.0], {"roll": 0.0, "pitch": shot["sun"]["pitch"], "yaw": shot["sun"]["yaw"]})
         focal.add_key(frame(start), float(shot["camera"]["focal_mm"]), interpolation=CONSTANT)

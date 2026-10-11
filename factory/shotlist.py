@@ -20,13 +20,14 @@ import argparse
 import json
 import math
 import sys
+from collections import Counter
 from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 
-from factory import poses, seastate, splash
-from factory.project import SENSOR_WIDTH_MM
+from factory import deform, poses, seastate, splash
+from factory.project import SENSOR_WIDTH_MM, Camera, transform_mesh
 
 WHALE_APPARENT_WIDTH_M = 13.0  # typical on-screen extent of a 16 m whale seen obliquely
 
@@ -56,7 +57,10 @@ def sample_pose(rng: np.random.Generator, config: dict) -> tuple[str, poses.Pose
     return name, pose
 
 
-def sample_camera(rng: np.random.Generator, config: dict, pose: poses.Pose, placed: dict, water_z_cm: float) -> dict:
+def sample_camera(rng: np.random.Generator, config: dict, pose: poses.Pose, placed: dict, water_z_cm: float,
+                  focal_scale: float = 1.0) -> dict:
+    """One camera draw. focal_scale multiplies the focal length the fill fraction asks for
+    (sample_camera_for_size zooms in with it when the above-water whale is too small)."""
     cam = config["camera"]
     distance_m = log_uniform(rng, *cam["distance_m"])
     elevated = rng.uniform() < cam["elevated_fraction"]
@@ -67,7 +71,7 @@ def sample_camera(rng: np.random.Generator, config: dict, pose: poses.Pose, plac
     location = aim + np.array([math.cos(angle) * distance_m * 100.0, math.sin(angle) * distance_m * 100.0, 0.0])
     location[2] = water_z_cm + height_m * 100.0
     fill = rng.uniform(*cam["fill_fraction"])
-    focal = fill * SENSOR_WIDTH_MM * distance_m / WHALE_APPARENT_WIDTH_M
+    focal = fill * SENSOR_WIDTH_MM * distance_m / WHALE_APPARENT_WIDTH_M * focal_scale
     focal = float(np.clip(focal, *cam["focal_mm"]))
     rotation = poses.look_at_rotation(location, aim)
     # Aim jitter: shift the view by a fraction of the frame, in angle.
@@ -78,6 +82,55 @@ def sample_camera(rng: np.random.Generator, config: dict, pose: poses.Pose, plac
     return {"location": location.round(2).tolist(), "rotation": rotation, "focal_mm": round(focal, 2),
             "bearing_deg": round(bearing, 2), "distance_m": round(distance_m, 2), "height_m": round(height_m, 2),
             "elevated": bool(elevated), "fill_fraction": round(fill, 3)}
+
+
+def visible_extent(world_cm: np.ndarray, camera: dict, resolution, water_z_cm: float = 0.0) -> dict:
+    """How much of the frame the above-water part of the whale spans, from projecting its
+    vertices: the larger side of their bounding box as a fraction of the frame (width for
+    horizontal, height for vertical), and the fraction of those vertices inside the frame."""
+    width, height = resolution
+    above = world_cm[world_cm[:, 2] > water_z_cm]
+    if len(above) == 0:
+        return {"extent_frame_fraction": 0.0, "in_frame_fraction": 0.0}
+    cam = Camera(camera["location"], camera["rotation"], camera["focal_mm"], width, height)
+    uv, depth = cam.project(above)
+    in_front = depth > 1.0
+    inside = in_front & (uv[:, 0] >= 0) & (uv[:, 0] < width) & (uv[:, 1] >= 0) & (uv[:, 1] < height)
+    if not inside.any():
+        return {"extent_frame_fraction": 0.0, "in_frame_fraction": 0.0}
+    pts = uv[inside]
+    extent = max((pts[:, 0].max() - pts[:, 0].min()) / width, (pts[:, 1].max() - pts[:, 1].min()) / height)
+    return {"extent_frame_fraction": round(float(extent), 4), "in_frame_fraction": round(float(inside.mean()), 4)}
+
+
+def sample_camera_for_size(rng: np.random.Generator, config: dict, pose: poses.Pose, placed: dict, world_cm: np.ndarray,
+                           water_z_cm: float = 0.0) -> dict:
+    """sample_camera, re-drawn until the above-water whale spans at least
+    camera.min_extent_frame_fraction of the frame with camera.min_in_frame_fraction of it in
+    view (when the config sets them). The fill fraction assumes a whole whale, so when only a
+    back or a fluke is out of the water the lens is zoomed in by the shortfall (a photographer
+    frames what is visible), within camera.focal_mm. After max_camera_tries the best draw is
+    kept."""
+    cam = config["camera"]
+    min_extent = cam.get("min_extent_frame_fraction", 0.0)
+    min_inside = cam.get("min_in_frame_fraction", 0.0)
+    tries = int(cam.get("max_camera_tries", 1)) if (min_extent > 0 or min_inside > 0) else 1
+    best, best_score = None, -2.0
+    focal_scale = 1.0
+    for _ in range(max(tries, 1)):
+        camera = sample_camera(rng, config, pose, placed, water_z_cm, focal_scale)
+        extent = visible_extent(world_cm, camera, config["resolution"], water_z_cm)
+        camera.update(extent)
+        score = extent["extent_frame_fraction"] if extent["in_frame_fraction"] >= min_inside else -1.0 + extent["in_frame_fraction"]
+        if score > best_score:
+            best, best_score = camera, score
+        if extent["extent_frame_fraction"] >= min_extent and extent["in_frame_fraction"] >= min_inside:
+            break
+        if 0 < extent["extent_frame_fraction"] < min_extent:
+            focal_scale *= min_extent / extent["extent_frame_fraction"] * 1.1
+        elif extent["extent_frame_fraction"] >= min_extent:
+            focal_scale = 1.0          # big enough but cut off by the frame edge: re-aim at normal zoom
+    return best
 
 
 def sample_lighting(rng: np.random.Generator, config: dict, camera_yaw: float) -> tuple[dict, dict, float, bool]:
@@ -96,8 +149,17 @@ def sample_lighting(rng: np.random.Generator, config: dict, camera_yaw: float) -
     return sun, fog, exposure, overcast
 
 
-def make_shot(index: int, rng: np.random.Generator, config: dict, vertices_cm: np.ndarray) -> dict:
+def make_shot(index: int, rng: np.random.Generator, config: dict, vertices_cm: np.ndarray,
+              fin_regions: dict | None = None) -> dict:
     category, pose = sample_pose(rng, config)
+    # Body deformation (the "animation") and skin variant, both optional in the config.
+    body = config.get("body", {})
+    params = deform.DeformParams()
+    if rng.uniform() < body.get("deform_fraction", 0.0):
+        params = deform.sample_params(rng, category, strength=float(rng.uniform(*body.get("strength", [0.6, 1.2]))))
+    geometry = vertices_cm if params.is_identity() else deform.deform(vertices_cm, params, fin_regions)
+    skin_weights = body.get("skin_weights", {"00": 1})
+    skin = weighted_choice(rng, skin_weights)
     spray_cfg = config["splash"]
     if pose.splash and rng.uniform() > spray_cfg["probability"].get(category, 1.0):
         pose = replace(pose, splash=None)                      # this time, no white water
@@ -107,8 +169,9 @@ def make_shot(index: int, rng: np.random.Generator, config: dict, vertices_cm: n
                        splash_amount=pose.splash_amount * float(rng.uniform(*spray_cfg["amount_jitter"])))
     elif pose.clearance_m > 0 and rng.uniform() < spray_cfg["extra_wash_fraction"]:
         pose = replace(pose, splash="wash", splash_scale=float(rng.uniform(0.3, 0.8)), splash_amount=float(rng.uniform(0.3, 0.8)))
-    placed = poses.place(vertices_cm, pose)
-    camera = sample_camera(rng, config, pose, placed, 0.0)
+    placed = poses.place(geometry, pose)
+    world = transform_mesh(geometry, placed["whale"])
+    camera = sample_camera_for_size(rng, config, pose, placed, world, 0.0)
     no_whale = rng.uniform() < config["no_whale_in_frame_fraction"]
     if no_whale:
         camera["rotation"]["yaw"] = round(camera["rotation"]["yaw"] + rng.choice([-1, 1]) * rng.uniform(30.0, 70.0), 4)
@@ -125,6 +188,8 @@ def make_shot(index: int, rng: np.random.Generator, config: dict, vertices_cm: n
         "overcast": bool(overcast),
         "look": look,
         "pose": {k: v for k, v in poses.asdict(pose).items() if k != "camera"},
+        "deform": deform.params_to_dict(params),
+        "skin": skin,
         "whale": placed["whale"],
         "camera": camera,
         "splash": splash_spec,
@@ -167,8 +232,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     config = json.loads(args.config.read_text())
     vertices = poses.load_obj_vertices(args.mesh)
+    regions = deform.fin_regions(vertices) if config.get("body", {}).get("deform_fraction", 0.0) > 0 else None
     rng = np.random.default_rng(args.seed)
-    shots = [make_shot(i, rng, config, vertices) for i in range(args.count)]
+    shots = [make_shot(i, rng, config, vertices, regions) for i in range(args.count)]
     args.out_dir.mkdir(parents=True, exist_ok=True)
     for shot in shots:
         splash.ensure_obj(shot.get("splash"), args.out_dir / "splash", shot["id"])
@@ -190,6 +256,13 @@ def main(argv: list[str] | None = None) -> int:
     print(f"{len(shots)} shots in {len(batches)} batches -> {args.out_dir}")
     print("categories:", dict(sorted(categories.items())))
     print("negatives:", sum(s["negative"] for s in shots), "no whale in frame:", sum(s["no_whale_in_frame"] for s in shots))
+    extents = np.array([s["camera"].get("extent_frame_fraction", 0.0) for s in shots if not s["negative"]])
+    if len(extents):
+        print(f"above-water extent (fraction of frame, whale shots): min {extents.min():.2f} p10 {np.percentile(extents, 10):.2f} "
+              f"median {np.median(extents):.2f} max {extents.max():.2f}; "
+              f"below {config['camera'].get('min_extent_frame_fraction', 0.0):.2f}: {(extents < config['camera'].get('min_extent_frame_fraction', 0.0)).sum()}")
+    print("deformed:", sum(not deform.params_from_dict(s["deform"]).is_identity() for s in shots),
+          "skins:", dict(sorted(Counter(s["skin"] for s in shots).items())))
     return 0
 
 

@@ -79,7 +79,7 @@ class ConvertTests(unittest.TestCase):
                 vertices[len(vertices)] = [float(t) for t in line.split()[1:]]
         # glTF (x, y, z) -> Unreal (-x, -z, y): the +X nose ends at -X... the body is re-centred,
         # and the raised vertex (glTF y = 1 m) is 100 cm up with glTF z = 0.5 m -> Unreal y = -25 after re-centring.
-        self.assertEqual(vertices[2], [0.0, -25.0, 100.0])  # width re-centred: glTF z 0..50 -> -25..25
+        self.assertEqual(vertices[2], [0.0, 25.0, 100.0])  # width re-centred, Y negated for Unreal's import
         self.assertEqual(vertices[0][0], 800.0)  # glTF -X tail becomes +X
         self.assertEqual(info["groups"], ["body"])
         rough = np.asarray(Image.open(self.out / "T_Humpback_Roughness.png"))

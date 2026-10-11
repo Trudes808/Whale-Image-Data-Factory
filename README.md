@@ -143,6 +143,28 @@ This repo is public. Put licensed assets (Fab, Sketchfab, and so on) under
 `unreal/WhaleFactory/Content/ThirdParty/`. That folder is gitignored, and the pre-commit
 hook also blocks it.
 
+## Body deformation and skins
+
+`factory/deform.py` bends the rigid mesh per shot (arch, tail curl, head pitch, lateral
+stroke, fluke twist, pectoral fin raise and sweep), sampled by pose category; the
+parameters are stored in the shot and in `meta/<id>.json` (`deform`), and the deformed
+mesh is regenerated from them in post-processing so body coordinates and keypoints stay
+exact. `factory/skin.py` makes skin variants from the base colour texture:
+
+```bash
+python3 -m factory.skin third_party_assets/humpback_k9239/converted/T_Humpback_BaseColor.png third_party_assets/humpback_k9239/skins --count 6 --seed 1
+tools/run_editor_script.sh build_scene      # imports them as MI_HumpbackSkin_<k>
+```
+
+Each shot records its `skin`; the `body` section of the config sets the deformation
+fraction and strength and the skin weights. In a batch every shot gets its own whale
+actor (deformed mesh, skin), shown only in its frames.
+
+Note for run01 (rendered before 2026-10-11): Unreal's OBJ importer mirrors Y, which the
+symmetric base whale hid. Pixel masks are unaffected, but run01's `bodycoords` angle
+channel, `keypoints` and `parts` have left and right swapped relative to the image. Later
+runs are correct (all OBJ writers negate Y).
+
 ## Building a dataset
 
 ```bash
@@ -154,7 +176,14 @@ nohup setsid tools/build_dataset.sh data/renders/run01 2000 1 > data/renders/run
 category with continuous pitch/roll/yaw/height jitter, camera bearing all around the
 whale, distance, boat or elevated height, focal length from how much of the frame the
 whale should fill, aim offset and roll, sea state, water colour, sun elevation and
-azimuth, overcast or clear, haze, exposure, spray, and negatives. Shots are grouped into
+azimuth, overcast or clear, haze, exposure, spray, and negatives. From run02 the camera
+also enforces a minimum on-screen size: the above-water part of the whale must span at
+least `camera.min_extent_frame_fraction` of the frame (0.25) with
+`camera.min_in_frame_fraction` of it in view; the lens is zoomed in by the shortfall (a
+photographer frames what is visible) and the draw repeated up to `max_camera_tries`.
+`camera.extent_frame_fraction` / `in_frame_fraction` are recorded per shot. The run01
+config (whales down to 3 % of the frame, more submerged negatives) is kept as
+`factory/config/poc_boat.run01.json`. Shots are grouped into
 batches by sea state and water colour; `tools/render_batch.sh` keys each batch into one
 level sequence (`wf_build_batch.py`) and renders it in one game session, about 2 s per
 shot plus editor start-up per batch. `factory/postprocess.py` then writes:
@@ -163,9 +192,12 @@ shot plus editor start-up per batch. `factory/postprocess.py` then writes:
 data/renders/run01/dataset/
   images/<id>.png     RGB
   masks/<id>.png      palette PNG, pixel values 0 background, 1 whale (above water, not
-                      spray); the palette shows whale as white in viewers, and
-                      np.asarray(Image.open(p)) or cv2.imread(p, cv2.IMREAD_UNCHANGED) gives
-                      the class ids
+                      spray), 2 whale just below the surface (from run02: whale pixels not in
+                      the rendered label whose surface is within labels.through_water_depth_m
+                      of the mean water plane, so the body may show through the water; an
+                      "ignore" class for segmentation, run01 has none); the palette shows 1 as
+                      white and 2 as grey in viewers, and np.asarray(Image.open(p)) gives the
+                      class ids (cv2 expands the palette to colours: 255 / 128)
   amodal/<id>.png     body-part id of the whole whale ignoring water (fluke, peduncle,
                       dorsal_back, mid_body, head), from projecting the mesh
   bodycoords/<id>.png canonical body coordinates per pixel of the amodal whale: R = fraction

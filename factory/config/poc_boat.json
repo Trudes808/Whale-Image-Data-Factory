@@ -1,5 +1,5 @@
 {
-  "description": "POC: one humpback, boat and some elevated viewpoints, all sea states and lighting.",
+  "description": "POC: one humpback, boat and some elevated viewpoints, all sea states and lighting. run02+: whale fills a reasonable part of the frame; through-water pixels labelled 2.",
   "resolution": [
     1280,
     720
@@ -15,7 +15,7 @@
     "pec_up": 6,
     "spyhop": 4,
     "awash": 12,
-    "submerged": 8
+    "submerged": 4
   },
   "pose_jitter": {
     "pitch_deg": 8,
@@ -26,7 +26,7 @@
       1.45
     ]
   },
-  "no_whale_in_frame_fraction": 0.04,
+  "no_whale_in_frame_fraction": 0.03,
   "camera": {
     "distance_m": [
       15,
@@ -42,15 +42,18 @@
       35
     ],
     "fill_fraction": [
-      0.12,
-      0.8
+      0.3,
+      0.85
     ],
     "focal_mm": [
       24,
       600
     ],
-    "aim_jitter_frame_fraction": 0.3,
-    "roll_deg": 4
+    "aim_jitter_frame_fraction": 0.2,
+    "roll_deg": 4,
+    "min_extent_frame_fraction": 0.25,
+    "min_in_frame_fraction": 0.85,
+    "max_camera_tries": 40
   },
   "sea_state_weights": {
     "glassy": 8,
@@ -196,5 +199,23 @@
       1.6
     ],
     "extra_wash_fraction": 0.15
+  },
+  "body": {
+    "deform_fraction": 0.85,
+    "strength": [
+      0.5,
+      1.2
+    ],
+    "skin_weights": {
+      "00": 25,
+      "01": 15,
+      "02": 15,
+      "03": 15,
+      "04": 15,
+      "05": 15
+    }
+  },
+  "labels": {
+    "through_water_depth_m": 1.5
   }
 }

@@ -237,6 +237,7 @@ unreal/**/*.code-workspace
 unreal/WhaleFactory/Content/ThirdParty/
 # Per-shot splash meshes imported by wf_shot.apply_splash (regenerated every batch)
 unreal/WhaleFactory/Content/WhaleFactory/Splash/Gen/
+unreal/WhaleFactory/Content/ThirdParty/Humpback/Gen/
 third_party_assets/
 
 # Rendered datasets, exports, checkpoints

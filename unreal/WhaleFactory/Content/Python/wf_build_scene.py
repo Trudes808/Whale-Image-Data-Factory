@@ -61,13 +61,14 @@ OCEAN_WAVES_PARAMS = {
     "min_wavelength": 120.0,
     "max_wavelength": 5000.0,
     "wavelength_falloff": 1.5,
-    "min_amplitude": 1.0,
-    "max_amplitude": 20.0,
+    "min_amplitude": 0.5,
+    "max_amplitude": 9.0,
     "amplitude_falloff": 2.0,
     "wind_angle_deg": 35.0,
     "direction_angular_spread_deg": 140.0,  # keep >= 120, see factory/seastate.py
-    "small_wave_steepness": 0.4,
-    "large_wave_steepness": 0.2,
+    # Per-wave steepness: keep num_waves * steepness <= 0.6 (see factory/seastate.py).
+    "small_wave_steepness": 0.034,
+    "large_wave_steepness": 0.019,
     "steepness_falloff": 2.0,
 }
 SEQUENCE_DIR = "/Game/WhaleFactory/Sequences"
@@ -87,6 +88,10 @@ WHALE_STENCIL = 1
 WATER_SURFACE_Z = 0.0
 WATER_BODY_INDEX = 0
 WATER_MPC = "/Water/Materials/MPC/MPC_Water"
+# Water mesh density: leaf vertex spacing = tile size (24 m) / 2^factor, and LODScale keeps
+# tiles fine that many times farther from the camera. See build_ocean.
+WATER_TESSELLATION_FACTOR = 8
+WATER_LOD_SCALE = 16.0
 # Where the ocean actor (and the island its spline encloses) sits; see build_ocean.
 ISLAND_CENTER = unreal.Vector(150000.0, 150000.0, 0.0)
 
@@ -150,7 +155,11 @@ def make_humpback_materials(textures: dict) -> dict:
     if unreal.EditorAssetLibrary.does_asset_exist(skin_path):
         unreal.EditorAssetLibrary.delete_asset(skin_path)
     skin = asset_tools.create_asset("M_HumpbackSkin", HUMPBACK_DIR, unreal.Material, unreal.MaterialFactoryNew())
-    base = texture_sample(skin, textures["base_color"], unreal.MaterialSamplerType.SAMPLERTYPE_COLOR, -500, -200)
+    # Base colour is a texture parameter so skin variants (factory/skin.py) are instances.
+    base = mel.create_material_expression(skin, unreal.MaterialExpressionTextureSampleParameter2D, -500, -200)
+    base.set_editor_property("parameter_name", "BaseColor")
+    base.set_editor_property("texture", textures["base_color"])
+    base.set_editor_property("sampler_type", unreal.MaterialSamplerType.SAMPLERTYPE_COLOR)
     mel.connect_material_property(base, "RGB", unreal.MaterialProperty.MP_BASE_COLOR)
     rough = texture_sample(skin, textures["roughness"], unreal.MaterialSamplerType.SAMPLERTYPE_LINEAR_GRAYSCALE, -700, 100)
     # Wet skin at the surface: scale the authored roughness down. A parameter so shots can
@@ -186,6 +195,31 @@ def make_humpback_materials(textures: dict) -> dict:
     return {"body": skin, "barnacle": skin, "eye": eye}
 
 
+SKINS_SRC = REPO_ROOT / "third_party_assets" / "humpback_k9239" / "skins"
+
+
+def make_skin_instances(skin_material: unreal.Material) -> int:
+    """MI_HumpbackSkin_<k> for every T_Humpback_BaseColor_<k>.png in SKINS_SRC (factory/skin.py)."""
+    count = 0
+    for png in sorted(SKINS_SRC.glob("T_Humpback_BaseColor_*.png")):
+        key = png.stem.rsplit("_", 1)[1]
+        if key == "00":
+            continue  # the base texture is the material's default
+        texture = import_texture(png, f"T_Humpback_BaseColor_{key}", srgb=True)
+        path = wf_shot.skin_instance_path(key)
+        if unreal.EditorAssetLibrary.does_asset_exist(path):
+            unreal.EditorAssetLibrary.delete_asset(path)
+        instance = asset_tools.create_asset(path.rsplit("/", 1)[1], HUMPBACK_DIR, unreal.MaterialInstanceConstant,
+                                            unreal.MaterialInstanceConstantFactoryNew())
+        unreal.MaterialEditingLibrary.set_material_instance_parent(instance, skin_material)
+        unreal.MaterialEditingLibrary.set_material_instance_texture_parameter_value(instance, "BaseColor", texture)
+        unreal.MaterialEditingLibrary.update_material_instance(instance)
+        unreal.EditorAssetLibrary.save_asset(path, only_if_is_dirty=False)
+        count += 1
+    log(f"skin instances: {count}")
+    return count
+
+
 def import_humpback() -> tuple:
     """Import the converted humpback OBJ and textures; returns (mesh, {slot name: material})."""
     if not (HUMPBACK_SRC / "SM_Humpback.obj").exists():
@@ -201,6 +235,7 @@ def import_humpback() -> tuple:
                                  compression=unreal.TextureCompressionSettings.TC_NORMALMAP),
     }
     materials = make_humpback_materials(textures)
+    make_skin_instances(materials["body"])
     mesh = import_asset(HUMPBACK_SRC / "SM_Humpback.obj", HUMPBACK_DIR, "SM_Humpback", options=mesh_import_options())
     if not isinstance(mesh, unreal.StaticMesh):
         raise RuntimeError(f"humpback import failed; got {mesh!r}")
@@ -250,28 +285,37 @@ return 1;  // the ocean is opaque in this pass, so the SceneDepth test above cov
 // surface the water renders (same waves, same time). Any sample under water -> hidden.
 float3 Dir = normalize(-CamVec);
 float RayLength = CDepth.r / max(dot(Dir, ResolvedView.ViewForward), 1e-4);
-float3 P = CamPos + Dir * RayLength;
 
 FWaterBodyData Body = GetWaterBodyData(BODY_INDEX);
 float MaxAmplitude = 0;
 for (int w = 0; w < Body.NumWaves; w++) MaxAmplitude += GetWaveDataNew(w, Body).Amplitude;
 float Ceiling = BASE_Z + MaxAmplitude + 1.0;
 
+// Only the part of the ray inside the wave band can be under water, so spend the samples
+// there: from the whale point back toward the camera until the ray rises above Ceiling.
 const int Steps = 128;
-for (int i = Steps; i >= 1; i--)  // whale point first, then back toward the camera
+float3 P = CamPos + Dir * RayLength;
+float fBand = 1.0;
+if (CamPos.z > Ceiling && CamPos.z > P.z)
+    fBand = saturate((Ceiling - P.z) / (CamPos.z - P.z));   // fraction of the ray (from P) below Ceiling
+float tStart = RayLength * (1.0 - fBand);
+for (int i = Steps; i >= 0; i--)  // whale point first, then back toward the camera
 {
-    float3 S = CamPos + Dir * (RayLength * i / Steps);
-    if (S.z > Ceiling) break;  // the rest of the ray toward the camera is above every crest
+    float3 S = CamPos + Dir * (tStart + (RayLength - tStart) * i / Steps);
+    if (S.z > Ceiling) break;
     // Height at S.xy: invert the horizontal Gerstner displacement by fixed-point iteration.
+    // Each wave's displacement derivative equals its steepness, so this converges only when
+    // the summed steepness is below 1 (factory/seastate.py keeps it at 0.6 or less; above 1
+    // the surface folds and the height is not even single-valued).
     float2 Q = S.xy;
     WaveOutput Wave = (WaveOutput)0;
-    for (int k = 0; k < 4; k++)
+    for (int k = 0; k < 12; k++)
     {
         Wave = GetAllGerstnerWavesNew(BODY_INDEX, WaterTime, DFPromote(Q));
         Q = S.xy - Wave.WPO.xy;
     }
     Wave = GetAllGerstnerWavesNew(BODY_INDEX, WaterTime, DFPromote(Q));
-    if (S.z < BASE_Z + Wave.WPO.z - 0.5) return 0;
+    if (S.z < BASE_Z + Wave.WPO.z - 0.1) return 0;
 }
 return 1;
 """
@@ -494,6 +538,13 @@ def make_ocean_waves(ocean: unreal.Actor) -> None:
 def build_ocean() -> unreal.Actor:
     zone = spawn(unreal.WaterZone, label="WaterZone")
     zone.set_editor_property("zone_extent", unreal.Vector2D(400000.0, 400000.0))
+    # Finer water mesh, kept fine farther out: with the defaults (tessellation 6, LOD scale
+    # 1) the surface 100+ m away is metres between vertices, so the 1-3 m chop the label
+    # evaluates analytically is not rendered and the mask's waterline disagrees with the
+    # image (run01, 2026-10-11). These properties are not Blueprint-visible: raw names.
+    water_mesh = zone.get_component_by_class(unreal.WaterMeshComponent)
+    water_mesh.set_editor_property("TessellationFactor", WATER_TESSELLATION_FACTOR)
+    water_mesh.set_editor_property("LODScale", WATER_LOD_SCALE)
     # The ocean's spline is a coastline: everything inside it is an island with no water. The
     # default spline is a 200 m square around the actor, so put the actor (and that island)
     # far from the whale; the ocean still fills the whole water zone at height WATER_SURFACE_Z.
@@ -507,6 +558,12 @@ def build_ocean() -> unreal.Actor:
     else:
         log("keeping the plugin's wave preset (WF_OCEAN_WAVES != custom)")
     component.set_editor_property("water_material", unreal.EditorAssetLibrary.load_asset(OCEAN_MATERIAL_INSTANCE))
+    # No depth attenuation of the waves. The plugin scales wave displacement by
+    # 1 - exp(-depth / (TargetWaveMaskDepth / 2)); with the defaults (fixed depth 5.12 m,
+    # mask depth 20.48 m) the rendered waves were 39 % of the Gerstner amplitude while the
+    # label pass evaluates the full amplitude (run01's waterline mismatches, 2026-10-11).
+    component.set_editor_property("fixed_water_depth", SEABED_DEPTH_CM)
+    component.set_editor_property("target_wave_mask_depth", 1.0)
     # Set extents via set_editor_property so the editor change event regenerates the ocean.
     component.set_editor_property("ocean_extents", unreal.Vector2D(400000.0, 400000.0))
     return ocean

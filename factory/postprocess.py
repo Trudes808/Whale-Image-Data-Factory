@@ -6,8 +6,12 @@ Reads RUN_DIR/raw/batch_NNN/ (from tools/render_batch.sh) and writes:
 
     RUN_DIR/dataset/images/<id>.png    RGB, sRGB (the last frame of the shot)
     RUN_DIR/dataset/masks/<id>.png     uint8 palette PNG: 0 background, 1 whale (visible above
-                                       water). Pixel values are class ids (read with PIL or
-                                       cv2.IMREAD_UNCHANGED); the palette shows whale as white.
+                                       water), 2 whale just below the surface (not in the
+                                       rendered visible mask, but the whale surface is within
+                                       labels.through_water_depth_m of the mean water plane, so
+                                       it may show through the water: an "ignore" class for
+                                       segmentation). Pixel values are class ids (read with PIL
+                                       or cv2.IMREAD_UNCHANGED); the palette shows 1 white, 2 grey.
     RUN_DIR/dataset/amodal/<id>.png    uint8: body-part id of the whole whale, water ignored
                                        (0 none; see factory.project.PART_IDS)
     RUN_DIR/dataset/bodycoords/<id>.png RGB8 over the amodal whale: R = fraction along the body
@@ -38,7 +42,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from factory import project, qa
+from factory import deform, project, qa
 
 VISIBLE_OUTSIDE_AMODAL_LIMIT = 0.05
 
@@ -47,7 +51,9 @@ def frame_files(raw_dir: Path, pass_name: str, frame: int) -> Path:
     return raw_dir / f"{pass_name}.{frame:04d}.png"
 
 
-MASK_PALETTE = [0, 0, 0, 255, 255, 255]
+MASK_PALETTE = [0, 0, 0, 255, 255, 255, 128, 128, 128]
+WATER_Z_CM = 0.0            # shots are placed against the mean water plane at z = 0 (factory.poses.place)
+THROUGH_WATER_DEPTH_M = 1.5  # default for runs whose config has no "labels" section (run01)
 PART_PALETTE = [0, 0, 0, 60, 120, 255, 40, 200, 200, 255, 220, 40, 255, 120, 40, 230, 60, 200]
 
 
@@ -56,6 +62,15 @@ def save_palette_png(values: np.ndarray, path: Path, palette: list) -> None:
     image = Image.fromarray(values.astype(np.uint8), mode="P")
     image.putpalette(palette + [0] * (768 - len(palette)))
     image.save(path)
+
+
+def through_water(amodal: np.ndarray, visible: np.ndarray, height_cm: np.ndarray, depth_m: float) -> np.ndarray:
+    """Whale pixels not in the visible label whose surface lies between the mean water plane and
+    depth_m below it. Deeper whale stays background; whale above the plane but not visible is
+    behind spray or a crest and stays background too."""
+    with np.errstate(invalid="ignore"):
+        shallow = (height_cm <= WATER_Z_CM) & (height_cm >= WATER_Z_CM - depth_m * 100.0)
+    return (amodal > 0) & ~visible & shallow
 
 
 def mask_stats(mask: np.ndarray) -> dict:
@@ -69,7 +84,7 @@ def mask_stats(mask: np.ndarray) -> dict:
 
 
 def process_shot(shot: dict, raw_dir: Path, frame: int, out: Path, vertices: np.ndarray, faces: np.ndarray,
-                 resolution, points: dict | None = None) -> dict:
+                 resolution, points: dict | None = None, through_water_depth_m: float = THROUGH_WATER_DEPTH_M) -> dict:
     width, height = resolution
     rgb_path = frame_files(raw_dir, "FinalImage", frame)
     label_path = frame_files(raw_dir, "FinalImageM_WhaleVisibleMask", frame)
@@ -77,8 +92,14 @@ def process_shot(shot: dict, raw_dir: Path, frame: int, out: Path, vertices: np.
         raise FileNotFoundError(f"missing frame {frame} for shot {shot['id']} in {raw_dir}")
     mask = qa.load_mask(label_path)
     camera = project.Camera(shot["camera"]["location"], shot["camera"]["rotation"], shot["camera"]["focal_mm"], width, height)
-    amodal, zbuf, body = project.amodal_and_parts(vertices, faces, shot["whale"], camera, extra=True)
+    params = deform.params_from_dict(shot.get("deform"))
+    geometry = vertices if params.is_identity() else deform.deform(vertices, params, deform.fin_regions(vertices))
+    amodal, zbuf, body, surface_z = project.amodal_and_parts(geometry, faces, shot["whale"], camera, extra=True,
+                                                             canonical_cm=vertices, world_z=True)
     check = project.check_against_mask(amodal, mask)
+    shallow = through_water(amodal, mask, surface_z, through_water_depth_m)
+    label = mask.astype(np.uint8)
+    label[shallow] = 2
     parts = {}
     for name, part_id in project.PART_IDS.items():
         region = amodal == part_id
@@ -86,7 +107,7 @@ def process_shot(shot: dict, raw_dir: Path, frame: int, out: Path, vertices: np.
                        "visible_fraction": round(float((mask & region).sum() / max(region.sum(), 1)), 4)}
     shot_id = shot["id"]
     shutil.copyfile(rgb_path, out / "images" / f"{shot_id}.png")
-    save_palette_png(mask, out / "masks" / f"{shot_id}.png", MASK_PALETTE)
+    save_palette_png(label, out / "masks" / f"{shot_id}.png", MASK_PALETTE)
     save_palette_png(np.clip(amodal, 0, 255), out / "amodal" / f"{shot_id}.png", PART_PALETTE)
     defined = amodal > 0
     coords = np.zeros(amodal.shape + (3,), np.uint8)
@@ -97,9 +118,10 @@ def process_shot(shot: dict, raw_dir: Path, frame: int, out: Path, vertices: np.
     Image.fromarray(coords).save(out / "bodycoords" / f"{shot_id}.png")
     depth_cm = np.where(defined, np.clip(zbuf, 0, 65535), 0).astype(np.uint16)
     Image.fromarray(depth_cm, mode="I;16").save(out / "depth" / f"{shot_id}.png")
-    keypoints = project.project_landmarks(points or {}, shot["whale"], camera, zbuf, mask)
+    keypoints = project.project_landmarks(project.landmark_positions(points or {}, geometry), shot["whale"], camera, zbuf, mask)
     whale_depth = project.pose_in_camera(shot["whale"], camera)
     stats = mask_stats(mask)
+    stats["through_water_pixels"] = int(shallow.sum())
     flags = []
     if 1.0 - check["visible_inside_amodal"] > VISIBLE_OUTSIDE_AMODAL_LIMIT and mask.any():
         flags.append("visible_outside_amodal")
@@ -130,7 +152,8 @@ def process_shot(shot: dict, raw_dir: Path, frame: int, out: Path, vertices: np.
     return meta
 
 
-def process_batch(run_dir: Path, batch_name: str, vertices: np.ndarray, faces: np.ndarray, points: dict | None = None) -> list[dict]:
+def process_batch(run_dir: Path, batch_name: str, vertices: np.ndarray, faces: np.ndarray, points: dict | None = None,
+                  through_water_depth_m: float = THROUGH_WATER_DEPTH_M) -> list[dict]:
     raw_dir = run_dir / "raw" / batch_name
     batch = json.loads((raw_dir / "batch.json").read_text())
     out = run_dir / "dataset"
@@ -140,7 +163,7 @@ def process_batch(run_dir: Path, batch_name: str, vertices: np.ndarray, faces: n
     metas = []
     for index, shot in enumerate(batch["shots"]):
         frame = index * per_shot + per_shot - 1
-        metas.append(process_shot(shot, raw_dir, frame, out, vertices, faces, batch["resolution"], points))
+        metas.append(process_shot(shot, raw_dir, frame, out, vertices, faces, batch["resolution"], points, through_water_depth_m))
     return metas
 
 
@@ -153,6 +176,7 @@ def write_manifest(run_dir: Path) -> int:
             "id": meta["id"], "image": meta["paths"]["image"], "mask": meta["paths"]["mask"], "amodal": meta["paths"]["amodal"],
             "category": meta["category"], "negative": meta["negative"], "sea_state": meta["sea_state"], "look": meta["look"],
             "visible_pixels": meta["visible"]["visible_pixels"], "visible_fraction_of_whale": meta["visible_fraction_of_whale"],
+            "through_water_pixels": meta["visible"].get("through_water_pixels", 0),
             "orientation": meta["orientation"], "qa_flags": meta["qa_flags"],
         }))
     (run_dir / "dataset" / "manifest.jsonl").write_text("\n".join(lines) + ("\n" if lines else ""))
@@ -167,16 +191,17 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     run_config = json.loads((args.run_dir / "run_config.json").read_text())
     mesh = args.mesh or Path(run_config["mesh"])
+    depth_m = float(run_config.get("config", {}).get("labels", {}).get("through_water_depth_m", THROUGH_WATER_DEPTH_M))
     vertices, faces, groups = project.load_obj(mesh, with_groups=True)
     points = project.landmarks(vertices, groups)
     (args.run_dir / "dataset").mkdir(parents=True, exist_ok=True)
     (args.run_dir / "dataset" / "landmarks_mesh_frame_cm.json").write_text(
-        json.dumps({k: np.round(v, 2).tolist() for k, v in points.items()}, indent=1))
+        json.dumps({k: np.round(v, 2).tolist() for k, v in project.landmark_positions(points, vertices).items()}, indent=1))
     raw = args.run_dir / "raw"
     names = args.batch or sorted(p.name for p in raw.iterdir() if (p / "done").exists())
     flagged = 0
     for name in names:
-        metas = process_batch(args.run_dir, name, vertices, faces, points)
+        metas = process_batch(args.run_dir, name, vertices, faces, points, depth_m)
         flagged += sum(bool(m["qa_flags"]) for m in metas)
         print(f"{name}: {len(metas)} shots, {sum(bool(m['qa_flags']) for m in metas)} flagged")
     total = write_manifest(args.run_dir)

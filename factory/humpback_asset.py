@@ -4,9 +4,11 @@ The asset (CC-BY-4.0, by K9239, see THIRD_PARTY.md) ships as a Sketchfab glTF: a
 mesh, 22 barnacle meshes and two eye spheres, each under its own node transform, with
 4K base colour, metallic-roughness and normal textures. Unreal's OBJ import keeps the
 file's axes as-is (verified with the procedural stand-in), so this script bakes every
-node transform, converts the glTF frame (Y up, right-handed, metres, snout toward -X)
+node transform (the importer does mirror Y, see write below), converts the glTF frame
+(Y up, right-handed, metres, snout toward -X)
 into the project's Unreal frame (+X snout, +Y right, +Z up, centimetres), and writes one
-OBJ with a material group per glTF material plus importer-friendly textures.
+OBJ with a material group per glTF material plus importer-friendly textures. OBJ files are
+written with Y negated because Unreal's OBJ importer mirrors Y on import.
 
     python3 -m factory.humpback_asset <extracted zip dir> <output dir> [--length-m 15.0]
 
@@ -153,7 +155,10 @@ def convert(src_dir: Path, out_dir: Path, length_m: float | None = None) -> dict
         if group not in groups_written:
             lines.append(f"usemtl {group}")
             groups_written.append(group)
-        lines.extend(f"v {x:.4f} {y:.4f} {z:.4f}" for x, y, z in v)
+        # Unreal's Interchange OBJ importer mirrors Y (right-handed file -> left-handed
+        # engine), which a symmetric whale hides; write -y so the engine mesh matches this
+        # frame (found 2026-10-11 with a deformed, asymmetric mesh).
+        lines.extend(f"v {x:.4f} {-y:.4f} {z:.4f}" for x, y, z in v)
         lines.extend(f"vt {u:.6f} {1.0 - t:.6f}" for u, t in uvs)  # glTF UV origin is top-left
         lines.extend(f"vn {x:.5f} {y:.5f} {z:.5f}" for x, y, z in n)
         for a, b, c in faces + vertex_base + 1:

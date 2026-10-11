@@ -26,6 +26,10 @@ import os
 import unreal
 
 WHALE_LABEL = "Whale"
+WHALE_VARIANT_PREFIX = "WhaleVar_"
+WHALE_MESH_DIR = "/Game/ThirdParty/Humpback/Gen"   # per-shot deformed whale meshes (gitignored)
+HUMPBACK_DIR = "/Game/ThirdParty/Humpback"
+WHALE_STENCIL = 1
 CAMERA_LABEL = "BoatCamera"
 SUN_LABEL = "Sun"
 FOG_LABEL = "HeightFog"
@@ -252,9 +256,64 @@ def apply_splash(spec: dict | None, label: str = "shot", hidden: bool = False) -
     return actors
 
 
+def skin_instance_path(skin: str) -> str:
+    return f"{HUMPBACK_DIR}/MI_HumpbackSkin_{skin}"
+
+
+def clear_whale_variants() -> None:
+    subsystem = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+    old = [a for a in subsystem.get_all_level_actors() if a.get_actor_label().startswith(WHALE_VARIANT_PREFIX)]
+    for actor in old:
+        subsystem.destroy_actor(actor)
+    if unreal.EditorAssetLibrary.does_directory_exist(WHALE_MESH_DIR):
+        unreal.EditorAssetLibrary.delete_directory(WHALE_MESH_DIR)
+    if old:
+        log(f"removed {len(old)} whale variants")
+
+
+def spawn_whale_variant(shot: dict, label: str, hidden: bool = False) -> unreal.Actor:
+    """A whale actor for one shot: its deformed mesh (whale.mesh_obj) or the base mesh, with
+    the shot's skin material instance, custom stencil 1, at the shot's transform."""
+    base = find_actor(WHALE_LABEL)
+    mesh_obj = shot["whale"].get("mesh_obj")
+    if mesh_obj:
+        mesh = import_asset(mesh_obj, WHALE_MESH_DIR, f"SM_Whale_{label}", options=mesh_import_options())
+        if not isinstance(mesh, unreal.StaticMesh):
+            raise RuntimeError(f"whale mesh import failed for {mesh_obj}: {mesh!r}")
+    else:
+        mesh = base.static_mesh_component.static_mesh
+    subsystem = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+    actor = subsystem.spawn_actor_from_class(unreal.StaticMeshActor, _vector(shot["whale"]["location"]),
+                                             _rotator(shot["whale"]["rotation"]))
+    actor.set_actor_label(f"{WHALE_VARIANT_PREFIX}{label}")
+    if hidden:
+        actor.set_actor_hidden_in_game(True)
+    smc = actor.static_mesh_component
+    smc.set_mobility(unreal.ComponentMobility.MOVABLE)
+    smc.set_static_mesh(mesh)
+    skin = str(shot.get("skin", "00"))
+    skin_material = unreal.EditorAssetLibrary.load_asset(skin_instance_path(skin)) if skin != "00" else None
+    base_smc = base.static_mesh_component
+    for slot in range(base_smc.get_num_materials()):
+        material = base_smc.get_material(slot)
+        # Slots: body, barnacle, eye (see wf_build_scene.import_humpback); the skin covers the first two.
+        if skin_material is not None and slot < 2:
+            material = skin_material
+        smc.set_material(slot, material)
+    smc.set_render_custom_depth(True)
+    smc.set_custom_depth_stencil_value(WHALE_STENCIL)
+    return actor
+
+
 def apply_shot(shot: dict) -> None:
+    clear_whale_variants()
+    base = find_actor(WHALE_LABEL)
     if "whale" in shot:
-        apply_transform(find_actor(WHALE_LABEL), shot["whale"])
+        apply_transform(base, shot["whale"])
+    uses_variant = bool(shot.get("whale", {}).get("mesh_obj")) or str(shot.get("skin", "00")) != "00"
+    base.set_actor_hidden_in_game(uses_variant)
+    if uses_variant:
+        spawn_whale_variant(shot, str(shot.get("id", shot.get("name", "shot"))))
     if "camera" in shot:
         apply_camera(find_actor(CAMERA_LABEL), shot["camera"])
     if "ocean" in shot:

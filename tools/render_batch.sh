@@ -25,10 +25,15 @@ for batch in "$@"; do
         continue
     fi
     echo "=== $name ==="
-    WF_BATCH_JSON="$(realpath "$batch")" "$WF_REPO_ROOT/tools/run_editor_script.sh" build_batch
+    # Deformed whale meshes for this batch (factory/deform.py), kept only while it renders.
+    mesh_dir="$run_dir/whales/$name"
+    rm -rf -- "$mesh_dir"
+    wf_python -m factory.deform "$batch" "$WF_REPO_ROOT/third_party_assets/humpback_k9239/converted/SM_Humpback.obj" "$mesh_dir"
+    WF_BATCH_JSON="$mesh_dir/batch.json" "$WF_REPO_ROOT/tools/run_editor_script.sh" build_batch
     rm -rf -- "$out_dir"
     WF_RENDER_CONFIG="$config" WF_RENDER_TIMEOUT_S="${WF_RENDER_TIMEOUT_S:-7200}" \
         "$WF_REPO_ROOT/tools/render_sequence.sh" /Game/WhaleFactory/Sequences/LS_Batch "$out_dir" | tail -1
     cp -f -- "$batch" "$out_dir/batch.json"
+    rm -rf -- "$mesh_dir"
     date -u +%FT%TZ > "$out_dir/done"
 done

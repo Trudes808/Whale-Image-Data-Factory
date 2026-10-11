@@ -86,13 +86,33 @@ RGB, the mask's waterline is within 1–4 px (median 1 px) at 1280×720.
 - **Keep in sync.** If the waves get depth attenuation (shallow water) or the ocean
   height or index changes, the shader's `BASE_Z` / `BODY_INDEX` defines must change with
   it.
-- **Wave spectrum limits.** With a narrow directional spread (`direction_angular_spread_deg`
-  of about 50 or less) the plugin's water surface stops occluding anything below the calm
-  level, so the whale and even test poles draw through the water while the label (which
-  evaluates the waves correctly) says they are under water. Spreads of 120 and above,
-  steep waves, 32 waves, 1.2 m wavelengths and 1.8 m amplitudes all render and label
-  correctly. `factory/seastate.py` enforces the minimum. `wf_probes.py` spawns striped
-  1 m poles around the whale to read the rendered water level off an image when in doubt.
+- **Wave spectrum limits.** Two, both enforced by `factory/seastate.py`:
+  1. Directional spread (`direction_angular_spread_deg`) at least 120. With about 50 or
+     less the plugin's surface stops occluding anything below the calm level, so the whale
+     and even test poles draw through the water. `wf_probes.py` spawns striped 1 m poles
+     around the whale to read the rendered water level off an image when in doubt.
+  2. Summed steepness at most 0.6. In the plugin's shader each wave's horizontal
+     displacement has a derivative equal to its steepness; above a sum of 1 the Gerstner
+     surface folds over itself (the sharp creases seen in run01's rough seas) and the water
+     height above a point is multi-valued, so the label's inversion of the displacement
+     (a fixed-point iteration that needs the sum below 1) cannot be exact. The plugin's
+     own default (16 waves at 0.2-0.4) has the same property; the presets now divide a
+     total of 0.3-0.6 over the waves.
+- **Unreal's OBJ import mirrors Y.** Found 2026-10-11 with a deformed (asymmetric) mesh:
+  the imported bounds had Y negated. The symmetric base whale hid this, so run01's pixel
+  labels are fine, but in run01 the rendered whale is the mirror image of the mesh frame
+  used for `bodycoords`, `keypoints` and `parts`: left/right are swapped there (eyes,
+  pectoral and fluke tips, the angle-around-body channel). All OBJ writers now negate Y
+  (`factory/humpback_asset.py`, `factory/deform.py`, `factory/splash.py`); from run02 on,
+  left is left. Verified: deformed shots label 99-99.8 % inside their projection.
+- **Wave depth attenuation (the cause of run01's waterline mismatches).** The plugin
+  scales the rendered displacement by `1 - exp(-depth / (TargetWaveMaskDepth / 2))`.
+  The ocean spawned with a fixed depth of 5.12 m and a mask depth of 20.48 m, so the
+  rendered waves were 39 % of the Gerstner amplitude while the label evaluated the full
+  amplitude. At close range the label's 0.5 m tolerance hid it; over a 150 m grazing
+  sightline the analytic crests hid the whale's hump while the image showed it. Fixed on
+  2026-10-11: fixed depth 60 m, mask depth 1 cm (factor 1.0), tolerance 0.1 m, presets
+  rescaled to keep the approved look. Verified on the four worst run01 shots.
 
 ## Water Realism
 
@@ -382,12 +402,17 @@ required when that work starts:
   regression of `pose_in_camera`; `pixels_per_metre_at_whale` and `whale_length_m` are
   the scale targets (for real photos with unknown focal length, scale must come from
   known whale dimensions, so the length-normalised body fraction is the robust quantity).
-- Still missing, in priority order: (1) a rigged model, since body flex (arching, fluke
-  curl) changes where a body location appears and a rigid mesh cannot teach that;
-  (2) texture variation (several individuals' pigmentation, synthetic scars and barnacle
-  patches) so neither the segmenter nor the correspondence model keys on one skin;
-  (3) real labelled photos for evaluation; (4) mild lens distortion and sensor noise
-  augmentation at training time, which are cheaper applied there than rendered.
+- Body flex and skin variation are now procedural (run02 onward): `factory/deform.py`
+  bends the mesh along its spine (arch, tail curl, head pitch, lateral stroke, fluke
+  twist) and rotates the pectoral fins at their roots, sampled per pose category and
+  stored per shot, so canonical body coordinates and keypoints stay exact (the mesh is
+  regenerated from the parameters in post-processing). `factory/skin.py` makes skin
+  variants (tone, mottling, rake marks, round scars, barnacle clusters) that become
+  material instances; each shot picks one. A real rig would add muscle-driven shapes and
+  smoother fin motion, but is no longer a blocker.
+- Still missing: real labelled photos for evaluation; mild lens distortion and sensor
+  noise augmentation at training time, which are cheaper applied there than rendered;
+  anatomically placed skin marks (needs the UV layout).
 
 ## POC Success Criteria
 

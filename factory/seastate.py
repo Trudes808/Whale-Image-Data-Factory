@@ -6,6 +6,12 @@ Keep ``direction_angular_spread_deg`` at 120 or more: with a narrow spread (50 o
 the Water plugin's surface stops occluding geometry below the calm water level (seen
 2026-10-10 with striped probe poles), so the render and the label disagree.
 
+Keep the *summed* steepness below about 0.6 (``_waves`` takes totals and divides by the
+wave count). In the plugin's Gerstner shader each wave's horizontal displacement has a
+derivative equal to its steepness, so when the sum exceeds 1 the surface folds over itself
+(sharp creases) and the water height above a point is no longer single-valued: the
+label's inversion of the displacement cannot match the render (run01, 2026-10-11).
+
 A preset sets three things in the shot JSON, all of which wf_shot.py applies without a
 scene rebuild: ``waves`` (GerstnerWaterWaveGeneratorSimple parameters, cm and degrees),
 and ``ocean`` (material instance parameters: surface detail, roughness). The plugin's
@@ -31,34 +37,43 @@ class SeaState:
     wind_spray: int = 0           # reserved: blown spray is not modelled yet (sprites looked wrong)
 
 
-def _waves(num, min_wl, max_wl, min_amp, max_amp, small_steep, large_steep, spread, wind=35.0, seed=7):
+MAX_TOTAL_STEEPNESS = 0.6
+
+
+def _waves(num, min_wl, max_wl, min_amp, max_amp, small_steep_total, large_steep_total, spread, wind=35.0, seed=7):
+    """small/large_steep_total are the *summed* steepness over all waves (kept <= MAX_TOTAL_STEEPNESS)."""
+    small_steep_total = min(small_steep_total, MAX_TOTAL_STEEPNESS)
+    large_steep_total = min(large_steep_total, MAX_TOTAL_STEEPNESS)
     return {
         "num_waves": num, "seed": seed,
         "min_wavelength": min_wl, "max_wavelength": max_wl, "wavelength_falloff": 1.5,
         "min_amplitude": min_amp, "max_amplitude": max_amp, "amplitude_falloff": 2.0,
         "wind_angle_deg": wind, "direction_angular_spread_deg": spread,
-        "small_wave_steepness": small_steep, "large_wave_steepness": large_steep, "steepness_falloff": 2.0,
+        "small_wave_steepness": round(small_steep_total / num, 4), "large_wave_steepness": round(large_steep_total / num, 4),
+        "steepness_falloff": 2.0,
     }
 
 
 SEA_STATES: dict[str, SeaState] = {
     "glassy": SeaState("flat calm: long low swell, mirror-like surface",
-                       _waves(12, 400.0, 3000.0, 0.3, 4.0, 0.1, 0.05, 150.0),
+                       _waves(12, 400.0, 3000.0, 0.2, 2.0, 0.3, 0.15, 150.0),
                        {"Default Near Normal Strength": 0.15, "Default Distant Normal Strength": 0.15, "Water Roughness": 0.015}),
     "calm": SeaState("light ripple, no whitecaps",
-                     _waves(16, 150.0, 3500.0, 0.6, 9.0, 0.3, 0.1, 150.0),
+                     _waves(16, 150.0, 3500.0, 0.3, 4.0, 0.45, 0.2, 150.0),
                      {"Default Near Normal Strength": 0.4, "Default Distant Normal Strength": 0.3, "Water Roughness": 0.03}),
     # Amplitudes are per wave (cm); the plugin sums them into its "max wave height", so
     # 16 waves with a 2.0 falloff give crests of very roughly 2-3x the largest amplitude.
+    # Rendered at full amplitude since the ocean's depth attenuation was switched off
+    # (wf_build_scene.build_ocean); these values give the look approved on 2026-10-11.
     "light": SeaState("light breeze: chop over a low swell (the scene default)",
-                      _waves(16, 120.0, 5000.0, 1.0, 20.0, 0.4, 0.2, 140.0),
+                      _waves(16, 120.0, 5000.0, 0.5, 9.0, 0.55, 0.3, 140.0),
                       {"Default Near Normal Strength": 0.7, "Default Distant Normal Strength": 0.5, "Water Roughness": 0.04}),
     "moderate": SeaState("moderate breeze: 1 m waves, scattered whitecaps",
-                         _waves(16, 150.0, 8000.0, 2.0, 45.0, 0.45, 0.22, 130.0),
+                         _waves(16, 150.0, 8000.0, 1.0, 20.0, 0.6, 0.35, 130.0),
                          {"Default Near Normal Strength": 0.85, "Default Distant Normal Strength": 0.6, "Water Roughness": 0.05},
                          ),
     "rough": SeaState("fresh to strong breeze: 2-3 m waves, whitecaps and blown spray",
-                      _waves(16, 200.0, 12000.0, 5.0, 110.0, 0.5, 0.25, 125.0),
+                      _waves(16, 200.0, 12000.0, 2.5, 50.0, 0.6, 0.4, 125.0),
                       {"Default Near Normal Strength": 1.0, "Default Distant Normal Strength": 0.7, "Water Roughness": 0.06},
                       ),
 }
@@ -75,6 +90,9 @@ def apply_to_shot(shot: dict, name: str, seed: int = 0) -> dict:
     state = SEA_STATES[name]
     if state.waves["direction_angular_spread_deg"] < MIN_SPREAD_DEG:
         raise ValueError(f"sea state {name!r}: direction spread must be >= {MIN_SPREAD_DEG} (see module doc)")
+    total = state.waves["num_waves"] * max(state.waves["small_wave_steepness"], state.waves["large_wave_steepness"])
+    if total > MAX_TOTAL_STEEPNESS + 1e-6:
+        raise ValueError(f"sea state {name!r}: summed steepness {total:.2f} exceeds {MAX_TOTAL_STEEPNESS} (see module doc)")
     shot["sea_state"] = name
     shot["waves"] = dict(state.waves, seed=state.waves["seed"] + seed)
     ocean = shot.setdefault("ocean", {})

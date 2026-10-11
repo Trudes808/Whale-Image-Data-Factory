@@ -137,21 +137,31 @@ def body_coordinates(vertices_cm: np.ndarray) -> np.ndarray:
     return np.stack([frac, angle], axis=1)
 
 
-def amodal_and_parts(vertices_cm: np.ndarray, faces: np.ndarray, whale: dict, camera: Camera, extra: bool = False):
+def amodal_and_parts(vertices_cm: np.ndarray, faces: np.ndarray, whale: dict, camera: Camera, extra: bool = False,
+                     canonical_cm: np.ndarray | None = None, world_z: bool = False):
     """Image of body-part ids (0 = no whale) for the whole whale, ignoring the water. With
-    extra=True also the depth buffer (cm) and the body-coordinate image (fraction, angle)."""
+    extra=True also the depth buffer (cm) and the body-coordinate image (fraction, angle);
+    with world_z=True as well, a fourth array: the world z (cm) of the whale surface at each
+    pixel (height above the mean water plane), nan where there is no whale.
+    vertices_cm is the geometry to project (possibly deformed); canonical_cm (default: the
+    same array) is the undeformed mesh that body coordinates and parts are measured on."""
+    if canonical_cm is None:
+        canonical_cm = vertices_cm
     world = transform_mesh(vertices_cm, whale)
     uv, depth = camera.project(world)
-    parts = part_of_vertices(vertices_cm)
+    parts = part_of_vertices(canonical_cm)
     face_parts = np.array([np.bincount(parts[f]).argmax() for f in faces], np.int32)
     if not extra:
         return rasterize(uv, depth, faces, camera.width, camera.height, face_parts)
-    coords = body_coordinates(vertices_cm)
+    coords = body_coordinates(canonical_cm)
     # Interpolating an angle across the 0/360 seam is wrong; interpolate its sin/cos.
-    attributes = np.stack([coords[:, 0], np.sin(np.radians(coords[:, 1])), np.cos(np.radians(coords[:, 1]))], axis=1)
+    attributes = np.stack([coords[:, 0], np.sin(np.radians(coords[:, 1])), np.cos(np.radians(coords[:, 1])), world[:, 2]], axis=1)
     image, zbuf, attrs = rasterize(uv, depth, faces, camera.width, camera.height, face_parts, attributes, return_extra=True)
     angle = (np.degrees(np.arctan2(attrs[..., 1], attrs[..., 2])) + 360.0) % 360.0
     body = np.stack([attrs[..., 0], angle], axis=-1)
+    if world_z:
+        height = np.where(image > 0, attrs[..., 3], np.nan)
+        return image, zbuf, body, height
     return image, zbuf, body
 
 
@@ -165,22 +175,33 @@ def landmarks(vertices_cm: np.ndarray, groups: dict | None = None) -> dict:
     tail = x < x.min() + 0.15 * length
     def pick(selection, values, best):
         idx = np.where(selection)[0]
-        return v[idx[best(values[idx])]] if len(idx) else None
+        return int(idx[best(values[idx])]) if len(idx) else None
 
-    points = {
+    indices = {
         "snout": pick(centre, x, np.argmax),
         "fluke_notch": pick(centre, x, np.argmin),
         "fluke_tip_left": pick(tail, y, np.argmin),
         "fluke_tip_right": pick(tail, y, np.argmax),
-        "dorsal_fin_tip": v[np.argmax(z)],
+        "dorsal_fin_tip": int(np.argmax(z)),
         "pectoral_tip_left": pick(y < 0, z, np.argmin),
         "pectoral_tip_right": pick(y > 0, z, np.argmin),
     }
     if groups and "eye" in groups:
-        eyes = v[groups["eye"]]
-        points["eye_left"] = eyes[eyes[:, 1] < 0].mean(axis=0)
-        points["eye_right"] = eyes[eyes[:, 1] >= 0].mean(axis=0)
-    return {name: np.asarray(p, float) for name, p in points.items() if p is not None}
+        eyes = np.asarray(groups["eye"])
+        left, right = eyes[v[eyes, 1] < 0], eyes[v[eyes, 1] >= 0]
+        if len(left):
+            indices["eye_left"] = [int(i) for i in left]
+        if len(right):
+            indices["eye_right"] = [int(i) for i in right]
+    return {name: i for name, i in indices.items() if i is not None}
+
+
+def landmark_positions(indices: dict, vertices_cm: np.ndarray) -> dict:
+    """Landmark points (cm) on a (possibly deformed) copy of the mesh, from landmark indices."""
+    out = {}
+    for name, i in indices.items():
+        out[name] = vertices_cm[i].mean(axis=0) if isinstance(i, list) else vertices_cm[i]
+    return out
 
 
 def project_landmarks(points: dict, whale: dict, camera: Camera, zbuf: np.ndarray, visible_mask: np.ndarray | None,
