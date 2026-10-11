@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Render one or more batches from factory/shotlist.py: each batch is keyed into LS_Batch
+# by wf_build_batch.py (one editor session) and rendered by Movie Render Queue in one
+# game session. Frames land in RUN_DIR/raw/batch_NNN/; factory/postprocess.py turns them
+# into the dataset.
+#
+#   tools/render_batch.sh RUN_DIR [BATCH.json ...]      # default: every batch in RUN_DIR/batches
+#
+# Skips batches whose raw directory already has a "done" marker, so it can be re-run.
+set -euo pipefail
+. "$(dirname "$0")/ue_env.sh"
+wf_require_engine
+
+run_dir="$(realpath -m "${1:?usage: $0 RUN_DIR [BATCH.json ...]}")"
+shift
+if [ "$#" -eq 0 ]; then
+    set -- "$run_dir"/batches/batch_*.json
+fi
+config="${WF_RENDER_CONFIG:-MRQ_Batch}"
+for batch in "$@"; do
+    name="$(basename "${batch%.json}")"
+    out_dir="$run_dir/raw/$name"
+    if [ -f "$out_dir/done" ]; then
+        echo "=== $name already rendered, skipping"
+        continue
+    fi
+    echo "=== $name ==="
+    WF_BATCH_JSON="$(realpath "$batch")" "$WF_REPO_ROOT/tools/run_editor_script.sh" build_batch
+    rm -rf -- "$out_dir"
+    WF_RENDER_CONFIG="$config" WF_RENDER_TIMEOUT_S="${WF_RENDER_TIMEOUT_S:-7200}" \
+        "$WF_REPO_ROOT/tools/render_sequence.sh" /Game/WhaleFactory/Sequences/LS_Batch "$out_dir" | tail -1
+    cp -f -- "$batch" "$out_dir/batch.json"
+    date -u +%FT%TZ > "$out_dir/done"
+done

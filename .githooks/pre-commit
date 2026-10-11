@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Block commits that would bloat this (public) repo or leak licensed assets:
+#  - anything under data/ or a third-party asset folder
+#  - any staged file larger than WF_MAX_COMMIT_FILE_KIB (default 5 MiB) that is not
+#    stored as a Git LFS pointer (LFS pointers are ~130 bytes when staged)
+# Bypass once, deliberately, with: git commit --no-verify
+set -euo pipefail
+max_kib="${WF_MAX_COMMIT_FILE_KIB:-5120}"
+fail=0
+while IFS= read -r -d '' path; do
+    case "$path" in
+        data/*|third_party_assets/*|unreal/*/Content/ThirdParty/*)
+            echo "pre-commit: blocked $path (generated data or third-party asset; never committed)" >&2
+            fail=1; continue ;;
+    esac
+    size="$(git cat-file -s ":$path" 2>/dev/null)" || continue
+    if [ "$size" -gt $((max_kib * 1024)) ]; then
+        echo "pre-commit: blocked $path ($((size / 1024)) KiB staged, not an LFS pointer)." >&2
+        echo "            Track its extension in .gitattributes or keep it out of git." >&2
+        fail=1
+    fi
+done < <(git diff --cached --name-only -z --diff-filter=AM)
+exit "$fail"

@@ -1,0 +1,200 @@
+{
+  "description": "POC: one humpback, boat and some elevated viewpoints, all sea states and lighting.",
+  "resolution": [
+    1280,
+    720
+  ],
+  "frames_per_shot": 3,
+  "batch_size": 50,
+  "pose_weights": {
+    "logging": 20,
+    "blow": 12,
+    "arch": 12,
+    "fluke_up": 10,
+    "breach": 6,
+    "pec_up": 6,
+    "spyhop": 4,
+    "awash": 12,
+    "submerged": 8
+  },
+  "pose_jitter": {
+    "pitch_deg": 8,
+    "roll_deg": 10,
+    "breach_roll_deg": 40,
+    "clearance_scale": [
+      0.55,
+      1.45
+    ]
+  },
+  "no_whale_in_frame_fraction": 0.04,
+  "camera": {
+    "distance_m": [
+      15,
+      150
+    ],
+    "boat_height_m": [
+      1.5,
+      4.5
+    ],
+    "elevated_fraction": 0.2,
+    "elevated_height_m": [
+      6,
+      35
+    ],
+    "fill_fraction": [
+      0.12,
+      0.8
+    ],
+    "focal_mm": [
+      24,
+      600
+    ],
+    "aim_jitter_frame_fraction": 0.3,
+    "roll_deg": 4
+  },
+  "sea_state_weights": {
+    "glassy": 8,
+    "calm": 12,
+    "light": 25,
+    "moderate": 30,
+    "rough": 25
+  },
+  "looks": {
+    "deep_blue": {
+      "weight": 35,
+      "vectors": {
+        "Absorption": [
+          5,
+          25,
+          90,
+          8
+        ],
+        "Scattering": [
+          0.5,
+          0.7,
+          1.0,
+          0.06
+        ],
+        "Water Albedo": [
+          0.25,
+          0.45,
+          0.8,
+          0.5
+        ]
+      }
+    },
+    "open_blue": {
+      "weight": 20,
+      "vectors": {
+        "Absorption": [
+          6,
+          40,
+          140,
+          8
+        ],
+        "Scattering": [
+          0.6,
+          0.8,
+          1.0,
+          0.12
+        ],
+        "Water Albedo": [
+          0.35,
+          0.55,
+          0.85,
+          0.5
+        ]
+      }
+    },
+    "coastal_green": {
+      "weight": 20,
+      "vectors": {
+        "Absorption": [
+          8,
+          70,
+          60,
+          8
+        ],
+        "Scattering": [
+          0.6,
+          1.0,
+          0.8,
+          0.3
+        ],
+        "Water Albedo": [
+          0.4,
+          0.7,
+          0.6,
+          0.5
+        ]
+      }
+    },
+    "grey": {
+      "weight": 25,
+      "vectors": {
+        "Absorption": [
+          6,
+          40,
+          140,
+          8
+        ],
+        "Scattering": [
+          0.8,
+          0.9,
+          1.0,
+          0.15
+        ],
+        "Water Albedo": [
+          0.6,
+          0.65,
+          0.7,
+          0.5
+        ]
+      }
+    }
+  },
+  "lighting": {
+    "sun_elevation_deg": [
+      4,
+      75
+    ],
+    "overcast_fraction": 0.3,
+    "clear_intensity": [
+      7,
+      12
+    ],
+    "overcast_intensity": [
+      1.5,
+      4.5
+    ],
+    "fog_density": [
+      0.0005,
+      0.02
+    ],
+    "exposure_ev": [
+      -1.0,
+      1.0
+    ]
+  },
+  "splash": {
+    "probability": {
+      "breach": 1.0,
+      "fluke_up": 0.8,
+      "pec_up": 0.75,
+      "spyhop": 0.6,
+      "arch": 0.5,
+      "blow": 0.4,
+      "logging": 0.0,
+      "awash": 0.0
+    },
+    "scale_jitter": [
+      0.6,
+      1.5
+    ],
+    "amount_jitter": [
+      0.5,
+      1.6
+    ],
+    "extra_wash_fraction": 0.15
+  }
+}

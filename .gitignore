@@ -218,3 +218,29 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ---------------------------------------------------------------------------
+# Whale Image Data Factory
+# ---------------------------------------------------------------------------
+
+# Unreal Engine generated/cached directories (can grow to tens of GiB; UE rebuilds them)
+unreal/**/Binaries/
+unreal/**/Intermediate/
+unreal/**/Saved/
+unreal/**/DerivedDataCache/
+unreal/**/.vs/
+unreal/**/*.sln
+unreal/**/*.code-workspace
+
+# Third-party (licensed) assets are never committed: this GitHub repo is public and
+# Fab/Sketchfab licenses generally forbid redistributing asset files.
+unreal/WhaleFactory/Content/ThirdParty/
+# Per-shot splash meshes imported by wf_shot.apply_splash (regenerated every batch)
+unreal/WhaleFactory/Content/WhaleFactory/Splash/Gen/
+third_party_assets/
+
+# Rendered datasets, exports, checkpoints
+data/
+
+# Machine-local overrides
+tools/ue_env.local.sh
