@@ -138,11 +138,15 @@ def body_coordinates(vertices_cm: np.ndarray) -> np.ndarray:
 
 
 def amodal_and_parts(vertices_cm: np.ndarray, faces: np.ndarray, whale: dict, camera: Camera, extra: bool = False,
-                     canonical_cm: np.ndarray | None = None, world_z: bool = False):
+                     canonical_cm: np.ndarray | None = None, world_z: bool = False, canonical_xyz: bool = False,
+                     deformed_xyz: bool = False):
     """Image of body-part ids (0 = no whale) for the whole whale, ignoring the water. With
     extra=True also the depth buffer (cm) and the body-coordinate image (fraction, angle);
-    with world_z=True as well, a fourth array: the world z (cm) of the whale surface at each
-    pixel (height above the mean water plane), nan where there is no whale.
+    with world_z=True as well, a further array: the world z (cm) of the whale surface at each
+    pixel (height above the mean water plane), nan where there is no whale; with
+    canonical_xyz=True, a further (H, W, 3) array: the point on the *undeformed* mesh (cm, mesh
+    frame: x tail -> snout, y right, z up) seen at each pixel, nan where there is no whale.
+    Return order: image, zbuf, body[, height][, canon].
     vertices_cm is the geometry to project (possibly deformed); canonical_cm (default: the
     same array) is the undeformed mesh that body coordinates and parts are measured on."""
     if canonical_cm is None:
@@ -155,14 +159,19 @@ def amodal_and_parts(vertices_cm: np.ndarray, faces: np.ndarray, whale: dict, ca
         return rasterize(uv, depth, faces, camera.width, camera.height, face_parts)
     coords = body_coordinates(canonical_cm)
     # Interpolating an angle across the 0/360 seam is wrong; interpolate its sin/cos.
-    attributes = np.stack([coords[:, 0], np.sin(np.radians(coords[:, 1])), np.cos(np.radians(coords[:, 1])), world[:, 2]], axis=1)
+    attributes = np.concatenate([np.stack([coords[:, 0], np.sin(np.radians(coords[:, 1])), np.cos(np.radians(coords[:, 1])), world[:, 2]], axis=1),
+                                 np.asarray(canonical_cm, float), np.asarray(vertices_cm, float)], axis=1)
     image, zbuf, attrs = rasterize(uv, depth, faces, camera.width, camera.height, face_parts, attributes, return_extra=True)
     angle = (np.degrees(np.arctan2(attrs[..., 1], attrs[..., 2])) + 360.0) % 360.0
     body = np.stack([attrs[..., 0], angle], axis=-1)
+    out = [image, zbuf, body]
     if world_z:
-        height = np.where(image > 0, attrs[..., 3], np.nan)
-        return image, zbuf, body, height
-    return image, zbuf, body
+        out.append(np.where(image > 0, attrs[..., 3], np.nan))
+    if canonical_xyz:
+        out.append(np.where((image > 0)[..., None], attrs[..., 4:7], np.nan).astype(np.float32))
+    if deformed_xyz:   # the point on the posed (scaled, bent) mesh in the whale frame, for pose fitting
+        out.append(np.where((image > 0)[..., None], attrs[..., 7:10], np.nan).astype(np.float32))
+    return tuple(out)
 
 
 def landmarks(vertices_cm: np.ndarray, groups: dict | None = None) -> dict:
@@ -186,6 +195,32 @@ def landmarks(vertices_cm: np.ndarray, groups: dict | None = None) -> dict:
         "pectoral_tip_left": pick(y < 0, z, np.argmin),
         "pectoral_tip_right": pick(y > 0, z, np.argmin),
     }
+    # run03 additions: the valleys and bases that pin the parts (chin, blowhole, dorsal fin front/back,
+    # tail base top/bottom, pectoral bases, belly). All geometric picks on the canonical mesh.
+    def band(x0, half):
+        return np.abs(x - x0) < half
+    xm = x.min()
+    extra = {
+        "chin": pick(centre & (x > xm + 0.9 * length), z, np.argmin),
+        "blowhole": pick(centre & band(xm + 0.80 * length, 0.025 * length), z, np.argmax),
+        "belly": pick(centre & band(xm + 0.55 * length, 0.03 * length), z, np.argmin),
+        "tail_base_top": pick(centre & band(xm + 0.21 * length, 0.02 * length), z, np.argmax),
+        "tail_base_bottom": pick(centre & band(xm + 0.21 * length, 0.02 * length), z, np.argmin),
+    }
+    if indices.get("dorsal_fin_tip") is not None:
+        xt = x[indices["dorsal_fin_tip"]]
+        extra["dorsal_fin_front"] = pick(centre & band(xt + 0.06 * length, 0.015 * length), z, np.argmax)
+        extra["dorsal_fin_back"] = pick(centre & band(xt - 0.05 * length, 0.015 * length), z, np.argmax)
+    try:
+        from factory import deform as _deform
+        for side_name, key in (("left", "pectoral_base_left"), ("right", "pectoral_base_right")):
+            region = _deform.fin_regions(v).get(side_name)
+            if region is not None and len(region["indices"]):
+                idx = region["indices"]
+                extra[key] = int(idx[np.argmin(np.abs(y[idx]))])
+    except Exception:
+        pass
+    indices.update({k: i for k, i in extra.items() if i is not None})
     if groups and "eye" in groups:
         eyes = np.asarray(groups["eye"])
         left, right = eyes[v[eyes, 1] < 0], eyes[v[eyes, 1] >= 0]
@@ -205,20 +240,46 @@ def landmark_positions(indices: dict, vertices_cm: np.ndarray) -> dict:
 
 
 def project_landmarks(points: dict, whale: dict, camera: Camera, zbuf: np.ndarray, visible_mask: np.ndarray | None,
-                      tolerance_cm: float = 40.0) -> dict:
+                      tolerance_cm: float = 40.0, water_z_cm: float | None = None, canonical: dict | None = None) -> dict:
     """Pixel positions of the landmarks; ``occluded`` if the body is in front of the point,
-    ``in_label`` if the rendered visible mask covers the pixel (above water, not sprayed)."""
+    ``in_label`` if the rendered visible mask covers the pixel (above water, not sprayed).
+    With water_z_cm, a ``state`` per keypoint: visible (in frame, not occluded, in the label),
+    under_water (in frame, not occluded, below the mean water plane), hidden (in frame, not in
+    the label but above the water: spray, wave or mask edge), occluded (behind the body),
+    out_of_frame. Also the point's whale-frame position (cm, deformed) and, from ``canonical``,
+    its canonical (undeformed, unit-size) position."""
     out = {}
     for name, point in points.items():
         world = transform_mesh(point[None, :], whale)
         uv, depth = camera.project(world)
         u, v = float(uv[0, 0]), float(uv[0, 1])
         inside = 0 <= u < camera.width and 0 <= v < camera.height and depth[0] > 0
-        entry = {"uv": [round(u, 1), round(v, 1)], "depth_m": round(float(depth[0]) / 100.0, 3), "in_frame": bool(inside)}
+        entry = {"uv": [round(u, 1), round(v, 1)], "depth_m": round(float(depth[0]) / 100.0, 3), "in_frame": bool(inside),
+                 "xyz_whale_cm": [round(float(c), 1) for c in point]}
+        if canonical is not None and name in canonical:
+            entry["xyz_canonical_cm"] = [round(float(c), 1) for c in canonical[name]]
+        if water_z_cm is not None:
+            entry["height_above_water_m"] = round(float(world[0, 2] - water_z_cm) / 100.0, 3)
         if inside:
             col, row = int(u), int(v)
             entry["occluded"] = bool(zbuf[row, col] < depth[0] - tolerance_cm)
-            entry["in_label"] = bool(visible_mask[row, col]) if visible_mask is not None else None
+            if visible_mask is not None:   # a thin tip can fall a pixel outside the mask: look at a 5x5 neighbourhood
+                r0, r1, c0, c1 = max(row - 2, 0), min(row + 3, visible_mask.shape[0]), max(col - 2, 0), min(col + 3, visible_mask.shape[1])
+                entry["in_label"] = bool(visible_mask[r0:r1, c0:c1].any())
+            else:
+                entry["in_label"] = None
+        if water_z_cm is not None:
+            if not inside:
+                state = "out_of_frame"
+            elif entry["occluded"]:
+                state = "occluded"
+            elif entry["in_label"]:
+                state = "visible"
+            elif world[0, 2] < water_z_cm:
+                state = "under_water"
+            else:
+                state = "hidden"
+            entry["state"] = state
         out[name] = entry
     return out
 

@@ -25,6 +25,6 @@ fi
 # Upper bound on disk: 3 frames x (RGB ~1 MiB + mask) per shot raw, plus the dataset copy.
 wf_python -m factory.diskguard check --path "$run_dir" --need-gib "$(( count * 5 / 1000 + 2 ))"
 "$WF_REPO_ROOT/tools/render_batch.sh" "$run_dir"
-wf_python -m factory.postprocess "$run_dir"
+wf_python -m factory.postprocess "$run_dir" --workers "${WF_POSTPROCESS_WORKERS:-16}"
 wf_python -m factory.dataset "$run_dir"
 echo "[$(date -u +%FT%TZ)] build_dataset: done -> $run_dir/dataset"

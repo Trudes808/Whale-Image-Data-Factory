@@ -74,8 +74,17 @@ def make_variant(base: np.ndarray, seed: int) -> tuple[np.ndarray, dict]:
         cx, cy = rng.uniform(0.05, 0.95) * w, rng.uniform(0.05, 0.95) * h
         for _ in range(int(rng.integers(6, 30))):
             px, py = cx + rng.normal(0, 40), cy + rng.normal(0, 40)
-            r = rng.uniform(3, 9)
-            draw.ellipse([px - r, py - r, px + r, py + r], fill=(200, 196, 190, 230), outline=(90, 85, 80, 230), width=1)
+            r = int(rng.integers(3, 10))
+            # a healed round scar: soft-edged, mottled, slightly off-white with a darker rim, never a solid disc
+            scar = Image.new("RGBA", (4 * r + 2, 4 * r + 2), (0, 0, 0, 0))
+            sd = ImageDraw.Draw(scar)
+            sd.ellipse([r, r, 3 * r, 3 * r], fill=(205, 200, 192, 200), outline=(95, 88, 82, 160), width=max(1, r // 6))
+            scar = scar.filter(ImageFilter.GaussianBlur(max(1.0, r / 3)))
+            sa = np.asarray(scar).astype(np.float32)
+            grain = rng.uniform(0.55, 1.0, size=sa.shape[:2])[..., None]
+            sa[..., 3] *= grain[..., 0]
+            scar = Image.fromarray(np.clip(sa, 0, 255).astype(np.uint8))
+            overlay.alpha_composite(scar, (int(px - 2 * r - 1), int(py - 2 * r - 1)))
     recipe.update(rake_marks=n_rakes, round_scars=n_round, barnacle_clusters=n_barnacle_clusters)
     overlay = overlay.filter(ImageFilter.GaussianBlur(0.8))
     ov = np.asarray(overlay).astype(np.float32) / 255.0

@@ -37,6 +37,8 @@ class DeformParams:
     fluke_twist_deg: float = 0.0 # roll of the flukes about the body axis
     fin_raise_deg: float = 0.0   # pectoral fins rotated up toward the back (+) or down (-)
     fin_sweep_deg: float = 0.0   # pectoral fins swept back (+) or forward (-)
+    arch_centre: float = 0.0     # body fraction (0 tail .. 1 snout) at the arch's apex; 0 = the default BODY_START..BODY_END region
+    arch_span: float = 0.0       # length of the arch region (body fraction) when arch_centre is set
 
     def is_identity(self) -> bool:
         return all(abs(getattr(self, f.name)) < 1e-9 for f in fields(self))
@@ -45,6 +47,7 @@ class DeformParams:
 def sample_params(rng: np.random.Generator, category: str, strength: float = 1.0) -> DeformParams:
     """Plausible deformation for a pose category (degrees), scaled by strength."""
     u = lambda lo, hi: float(rng.uniform(lo, hi)) * strength  # noqa: E731
+    category = {"fin_tip": "pec_up", "fluke_edge": "fluke_up", "peduncle": "arch", "back_arch": "arch", "spyhop_low": "spyhop", "roll_belly": "breach", "blow_sliver": "blow"}.get(category, category)
     if category == "fluke_up":
         p = DeformParams(arch_deg=u(0, 10), tail_curl_deg=u(-25, 25), lateral_deg=u(-15, 15), fluke_twist_deg=u(-15, 15))
     elif category == "arch":
@@ -73,7 +76,11 @@ def _bend_profile(frac: np.ndarray, params: DeformParams) -> tuple[np.ndarray, n
     # Arch: a bump of curvature over the body, so the angle goes from -A/2 at the tail end of
     # the region to +A/2 at the head end (back curves upward in between).
     if params.arch_deg:
-        t = _smooth((frac - BODY_START) / (BODY_END - BODY_START))
+        lo, hi = BODY_START, BODY_END
+        if params.arch_centre:
+            span = params.arch_span or (BODY_END - BODY_START)
+            lo, hi = params.arch_centre - span / 2, params.arch_centre + span / 2
+        t = _smooth((frac - lo) / (hi - lo))
         pitch += np.radians(params.arch_deg) * (t - 0.5)
     # Tail curl: angle grows toward the fluke tips (frac -> 0).
     if params.tail_curl_deg:
@@ -233,15 +240,32 @@ def write_batch_meshes(batch_path, base_obj, out_dir) -> dict:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     batch = json.loads(Path(batch_path).read_text())
+    if batch.get("whale_kind", "k9239") != "k9239":
+        from factory.whalemodel import WhaleModel
+
+        model = WhaleModel(batch["whale_kind"])
+        for shot in batch["shots"]:
+            path = out_dir / f"{shot['id']}.obj"
+            model.write_obj(model.posed(shot), path, f"{batch['whale_kind']} posed for shot {shot['id']} (clip t {(shot.get('pose') or {}).get('clip_t')})")
+            shot["whale"]["mesh_obj"] = str(path.resolve())
+            if shot.get("companion"):
+                cpath = out_dir / f"{shot['id']}c.obj"
+                model.write_obj(model.posed(shot["companion"]), cpath, f"{batch['whale_kind']} companion of shot {shot['id']}")
+                shot["companion"]["whale"]["mesh_obj"] = str(cpath.resolve())
+        (out_dir / "batch.json").write_text(json.dumps(batch))
+        return {"shots": len(batch["shots"]), "meshes": len(batch["shots"])}
     vertices, _ = project.load_obj(base_obj)
     regions = fin_regions(vertices)
     count = 0
     for shot in batch["shots"]:
         params = params_from_dict(shot.get("deform"))
-        if params.is_identity():
+        scale = float(shot.get("body_scale", 1.0))
+        if params.is_identity() and abs(scale - 1.0) < 1e-6:
             continue
         path = out_dir / f"{shot['id']}.obj"
-        write_obj_with_vertices(base_obj, deform(vertices, params, regions), path)
+        base = vertices * scale if abs(scale - 1.0) > 1e-6 else vertices
+        reg = regions if abs(scale - 1.0) < 1e-6 else fin_regions(base)
+        write_obj_with_vertices(base_obj, deform(base, params, reg) if not params.is_identity() else base, path)
         shot["whale"]["mesh_obj"] = str(path.resolve())
         count += 1
     (out_dir / "batch.json").write_text(json.dumps(batch))

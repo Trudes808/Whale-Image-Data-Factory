@@ -101,10 +101,25 @@ class PostprocessTests(unittest.TestCase):
                 self.assertEqual(int((label == 1).sum()), 8)
                 self.assertTrue(((label == 2) <= (amodal > 0)).all())       # through-water only on the whale
                 self.assertEqual(row["through_water_pixels"], int((label == 2).sum()))
+                canon_cm, defined = postprocess.read_canon(run / "dataset" / "canon" / f"{row['id']}.npz")
+                self.assertEqual(canon_cm.shape, amodal.shape + (3,))
+                self.assertTrue((defined == (amodal > 0)).all())
+                if defined.any():
+                    self.assertTrue((np.abs(canon_cm[defined][:, 0]) <= 800.5).all())    # inside the stick whale's x range
+                    self.assertTrue(np.isfinite(canon_cm[defined]).all())
             splits = dataset.split(rows, 0.5, 1)
             self.assertEqual(len(splits["train"]) + len(splits["val"]), 2)
             self.assertIn("categories", dataset.summary(rows))
 
+
+
+class CanonTests(unittest.TestCase):
+    def test_encode_decode_round_trip(self):
+        cm = np.full((2, 3, 3), np.nan, np.float32)
+        cm[0, 0] = (-805.0, 314.2, -396.0); cm[1, 2] = (805.0, -0.05, 337.0)
+        back, defined = postprocess.decode_canon(postprocess.encode_canon(cm))
+        self.assertEqual(defined.sum(), 2)
+        np.testing.assert_allclose(back[defined], cm[np.isfinite(cm[..., 0])], atol=0.06)
 
 
 class ThroughWaterTests(unittest.TestCase):

@@ -93,7 +93,7 @@ def ellipsoid(centre: np.ndarray, axis: np.ndarray, length_cm: float, width_cm: 
 
 
 def droplets(rng: np.random.Generator, centre: np.ndarray, radius_cm: float, height_cm: float, count: int,
-             elevation_deg=(45.0, 85.0), size_cm=(6.0, 28.0), ring=(0.4, 1.0), spread_deg: float = 30.0,
+             elevation_deg=(45.0, 85.0), size_cm=(2.5, 10.0), ring=(0.4, 1.0), spread_deg: float = 30.0,
              age=(0.15, 1.0), v_uv: float = 0.1) -> Mesh:
     """Droplets on ballistic arcs launched from a ring around the centre."""
     parts = []
@@ -180,7 +180,7 @@ def build_mesh(spec: dict) -> Mesh:
         n_plumes = max(3, int(round(rng.integers(6, 12) * amount)))
         parts = plumes(rng, centre, radius, height, n_plumes)
         parts += plumes(rng, centre, radius * 0.8, height * 0.25, max(2, n_plumes // 2), height_range=(0.5, 1.0))  # low skirt
-        parts.append(droplets(rng, centre, radius, height * 1.2, count=int(60 * amount)))
+        parts.append(droplets(rng, centre, radius, height * 1.2, count=int(90 * amount)))
         for _ in range(int(rng.integers(2, 5))):
             offset = np.array([rng.uniform(-0.5, 0.5) * radius, rng.uniform(-0.5, 0.5) * radius, 0.0])
             parts.append(foam_disc(rng, centre + offset, 0.0, radius * rng.uniform(0.5, 1.2)))
@@ -191,8 +191,8 @@ def build_mesh(spec: dict) -> Mesh:
         offset = np.array([rng.uniform(-1.0, 1.0) * radius, rng.uniform(-0.6, 0.6) * radius, 0.0])
         parts.append(foam_disc(rng, centre + offset, 0.0, radius * rng.uniform(0.3, 0.7)))
     parts += plumes(rng, centre, radius * 0.7, max(height, 40.0), max(2, int(round(4 * amount))), height_range=(0.4, 1.0))
-    parts.append(droplets(rng, centre, radius, max(height, 40.0), count=int(25 * amount),
-                          elevation_deg=(30.0, 70.0), size_cm=(5.0, 16.0)))
+    parts.append(droplets(rng, centre, radius, max(height, 40.0), count=int(40 * amount),
+                          elevation_deg=(30.0, 70.0), size_cm=(2.0, 7.0)))
     return Mesh.concat(parts)
 
 

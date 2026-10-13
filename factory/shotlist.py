@@ -26,7 +26,11 @@ from pathlib import Path
 
 import numpy as np
 
-from factory import deform, poses, seastate, splash
+from factory import deform, gerstner, islands, poses, seastate, skies, splash, whitewater
+from factory.whalemodel import WhaleModel, sample_clip_time
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+_SKY_CATALOGUE: dict | None = None
 from factory.project import SENSOR_WIDTH_MM, Camera, transform_mesh
 
 WHALE_APPARENT_WIDTH_M = 13.0  # typical on-screen extent of a 16 m whale seen obliquely
@@ -114,21 +118,37 @@ def sample_camera_for_size(rng: np.random.Generator, config: dict, pose: poses.P
     cam = config["camera"]
     min_extent = cam.get("min_extent_frame_fraction", 0.0)
     min_inside = cam.get("min_in_frame_fraction", 0.0)
-    tries = int(cam.get("max_camera_tries", 1)) if (min_extent > 0 or min_inside > 0) else 1
-    best, best_score = None, -2.0
+    # run03: a per-shot target for how much of the frame the *visible* whale spans (log-uniform in
+    # camera.extent_target, e.g. 0.3 .. 1.6 of the frame, i.e. from a small whale to one cut by the
+    # frame edges as in long-lens field photos); the lens zooms in or out towards it.
+    target = log_uniform(rng, *cam["extent_target"]) if cam.get("extent_target") else None
+    tries = int(cam.get("max_camera_tries", 1)) if (min_extent > 0 or min_inside > 0 or target) else 1
+    best, best_score = None, -20.0
     focal_scale = 1.0
     for _ in range(max(tries, 1)):
         camera = sample_camera(rng, config, pose, placed, water_z_cm, focal_scale)
         extent = visible_extent(world_cm, camera, config["resolution"], water_z_cm)
         camera.update(extent)
-        score = extent["extent_frame_fraction"] if extent["in_frame_fraction"] >= min_inside else -1.0 + extent["in_frame_fraction"]
+        if target:
+            camera["extent_target"] = round(target, 4)
+        ext, inside = extent["extent_frame_fraction"], extent["in_frame_fraction"]
+        if target:
+            score = -abs(math.log(max(ext, 1e-3) / target)) if inside >= min_inside else -10.0 + inside
+        else:
+            score = ext if inside >= min_inside else -1.0 + inside
         if score > best_score:
             best, best_score = camera, score
-        if extent["extent_frame_fraction"] >= min_extent and extent["in_frame_fraction"] >= min_inside:
+        if target:
+            if 0.8 * target <= ext <= 1.25 * target and inside >= min_inside:
+                break
+            if ext > 0:
+                focal_scale *= float(np.clip(target / ext, 0.3, 3.0))
+            continue
+        if ext >= min_extent and inside >= min_inside:
             break
-        if 0 < extent["extent_frame_fraction"] < min_extent:
-            focal_scale *= min_extent / extent["extent_frame_fraction"] * 1.1
-        elif extent["extent_frame_fraction"] >= min_extent:
+        if 0 < ext < min_extent:
+            focal_scale *= min_extent / ext * 1.1
+        elif ext >= min_extent:
             focal_scale = 1.0          # big enough but cut off by the frame edge: re-aim at normal zoom
     return best
 
@@ -149,17 +169,145 @@ def sample_lighting(rng: np.random.Generator, config: dict, camera_yaw: float) -
     return sun, fog, exposure, overcast
 
 
+def sample_sky(rng: np.random.Generator, config: dict, light: dict) -> tuple[dict | None, dict | None, bool | None]:
+    """A real sky HDRI (config "skies": directory, fraction, intensity jitter) with the sun light that
+    matches it, or None to keep the atmosphere model. Returns (sky spec, sun spec, overcast)."""
+    global _SKY_CATALOGUE
+    cfg = config.get("skies")
+    if not cfg:
+        return None, None, None
+    if _SKY_CATALOGUE is None:
+        d = Path(cfg["directory"]); d = d if d.is_absolute() else REPO_ROOT / d
+        _SKY_CATALOGUE = {k: dict(v, path=str((d / v.get("png", v["file"])).resolve())) for k, v in skies.load_catalogue(d).items()}
+    if not _SKY_CATALOGUE or rng.uniform() > cfg.get("fraction", 1.0):
+        return None, None, None
+    overcast = rng.uniform() < light["overcast_fraction"]
+    pool = [k for k, v in _SKY_CATALOGUE.items() if v["overcast"] == overcast] or list(_SKY_CATALOGUE)
+    name = pool[int(rng.integers(len(pool)))]; sky = _SKY_CATALOGUE[name]
+    rotation = float(rng.uniform(0.0, 360.0))
+    # the sky's own sun: the light's forward vector points from the sun, so yaw = azimuth + 180
+    elevation = max(float(sky["sun_elevation_deg"]), 2.0)
+    yaw = (float(sky["sun_azimuth_deg"]) + rotation + 180.0) % 360.0
+    intensity = rng.uniform(*(light["overcast_intensity"] if sky["overcast"] else light["clear_intensity"]))
+    sun = {"pitch": round(-elevation, 2), "yaw": round(yaw, 2), "intensity": round(float(intensity), 2),
+           "elevation_deg": round(elevation, 2), "from_sky": name}
+    lo, hi = cfg.get("intensity_jitter", [0.8, 1.25])
+    emissive = float(np.clip(cfg.get("sky_median_target", 1.5) / max(float(sky["sky_median_luminance"]), 1e-3), 0.3, 12.0) * rng.uniform(lo, hi))
+    emissive *= float(sky.get("png_scale", 1.0))                           # the PNG holds radiance / png_scale
+    spec = {"name": name, "file": sky["path"], "rotation_deg": round(rotation, 2), "intensity": round(emissive, 3), "overcast": bool(sky["overcast"])}
+    return spec, sun, bool(sky["overcast"])
+
+
+# pectoral fin droop (deg below the clip's straight-out fins) per category: surface whales carry them down; the
+# rolled categories keep them out so the roll raises one
+PEC_DROOP_DEG = {"pec_up": (-35.0, 5.0), "fin_tip": (-25.0, 10.0), "roll_belly": (-20.0, 10.0), "breach": (-20.0, 20.0),
+                 "spyhop": (0.0, 20.0), "spyhop_low": (0.0, 20.0)}
+COMPANION_CATEGORIES = {"logging", "blow", "blow_sliver", "awash", "arch", "back_arch", "peduncle", "fluke_up", "pec_up", "fin_tip"}
+CALF_CATEGORIES = {"logging": 0.3, "blow": 0.3, "awash": 0.15, "back_arch": 0.25}
+
+
+def sample_companion(rng: np.random.Generator, config: dict, model, category: str, pose: poses.Pose, placed: dict,
+                     geometry: np.ndarray) -> dict | None:
+    """A calf beside the whale (config "companion": {"fraction", "scale", "lateral_cm", "along_cm"}): its own
+    individual (c..), body scale, surface pose category and clip time, yawed roughly with its mother and
+    placed off her flank on the mean water plane. Returns a shot-like dict (whale, pose, body_scale,
+    individual, skin, whale_kind) plus "_world" (its vertices, for the camera framing) or None."""
+    cfg = config.get("companion") or {}
+    if model is None or model.kind != "humpback4k" or category not in COMPANION_CATEGORIES:
+        return None
+    if rng.uniform() >= float(cfg.get("fraction", 0.0)):
+        return None
+    calves = sorted(k for k in model.individuals() if k.startswith("c"))
+    if not calves:
+        return None
+    calf = calves[int(rng.integers(len(calves)))]
+    scale = float(rng.uniform(*cfg.get("scale", [0.35, 0.5])))
+    ccat = weighted_choice(rng, CALF_CATEGORIES)
+    base = poses.POSES[ccat]; jitter = config["pose_jitter"]
+    cpose = replace(base, pitch_deg=base.pitch_deg + rng.uniform(-jitter["pitch_deg"], jitter["pitch_deg"]),
+                    roll_deg=base.roll_deg + rng.uniform(-jitter["roll_deg"], jitter["roll_deg"]),
+                    clearance_m=(base.clearance_m * rng.uniform(*jitter["clearance_scale"]) if base.clearance_m > 0 else base.clearance_m * rng.uniform(0.5, 2.0)) * scale,
+                    yaw_deg=float((pose.yaw_deg + rng.normal(0.0, 20.0)) % 360.0), splash=None)
+    clip_t = sample_clip_time(rng, ccat)
+    cshot = {"body_scale": round(scale, 4), "deform": None, "pose": {"clip_t": clip_t} if clip_t is not None else {}, "individual": calf,
+             "pec_droop_deg": round(float(rng.uniform(10.0, 40.0)), 2)}
+    cgeom = model.posed(cshot)
+    cplaced = poses.place(cgeom, cpose)
+    # beside the mother: lateral offset past both half-widths, anywhere along her flank, in her heading frame
+    side = float(rng.choice([-1.0, 1.0]))
+    half_mom = float(np.percentile(np.abs(geometry[:, 1]), 97))          # body frame: half-width, whatever her heading
+    half_calf = float(np.percentile(np.abs(cgeom[:, 1]), 97))
+    lat_lo, lat_hi = cfg.get("lateral_cm", [40.0, 300.0])
+    lateral = side * (half_mom + half_calf + float(rng.uniform(lat_lo, lat_hi)))
+    along = float(rng.uniform(*cfg.get("along_cm", [-500.0, 500.0])))
+    yaw = math.radians(pose.yaw_deg)
+    dx = along * math.cos(yaw) - lateral * math.sin(yaw); dy = along * math.sin(yaw) + lateral * math.cos(yaw)
+    mom = placed["whale"]["location"]
+    location = [round(mom[0] + dx, 2), round(mom[1] + dy, 2), cplaced["whale"]["location"][2]]
+    cshot.update({"whale": {"location": location, "rotation": cplaced["whale"]["rotation"]}, "pose": cshot["pose"] | {k: v for k, v in poses.asdict(cpose).items() if k != "camera"},
+                  "category": ccat, "skin": calf, "whale_kind": model.kind, "role": "calf"})
+    cshot["_world"] = transform_mesh(cgeom, cshot["whale"])
+    return cshot
+
+
 def make_shot(index: int, rng: np.random.Generator, config: dict, vertices_cm: np.ndarray,
-              fin_regions: dict | None = None) -> dict:
+              fin_regions: dict | None = None, model: WhaleModel | None = None) -> dict:
     category, pose = sample_pose(rng, config)
+    clip_t = sample_clip_time(rng, category) if (model is not None and model.kind == "humpback4k") else None
+    if clip_t is not None and pose.pitch_deg < 0 and category not in poses.BACK_HEIGHT_CATEGORIES:
+        # tail-up categories: the keyframe already lifts the fluke; take most of that out of the nose-down pitch
+        lift = model.fluke_lift_deg(clip_t)
+        pose = replace(pose, pitch_deg=min(0.0, pose.pitch_deg + 0.5 * max(lift, 0.0)))
+    # The sea is chosen first so that a pose meant to show above the water clears the waves: the
+    # clearance is lifted by a fraction of the crest height (config body.wave_clearance_fraction).
+    sea = weighted_choice(rng, config["sea_state_weights"])
+    lift = float(config.get("body", {}).get("wave_clearance_fraction", 0.0))
+    if lift > 0 and pose.clearance_m > 0:
+        pose = replace(pose, clearance_m=pose.clearance_m + lift * seastate.crest_height_m(sea))
     # Body deformation (the "animation") and skin variant, both optional in the config.
     body = config.get("body", {})
     params = deform.DeformParams()
-    if rng.uniform() < body.get("deform_fraction", 0.0):
+    rigged = model is not None and model.kind == "humpback4k"
+    if not rigged and rng.uniform() < body.get("deform_fraction", 0.0):
         params = deform.sample_params(rng, category, strength=float(rng.uniform(*body.get("strength", [0.6, 1.2]))))
-    geometry = vertices_cm if params.is_identity() else deform.deform(vertices_cm, params, fin_regions)
+    # Body size: humpback length varies from calf to large adult; the canonical labels stay on the unit mesh.
+    scale = float(rng.uniform(*body["length_scale"])) if body.get("length_scale") else 1.0
+    procedural_bend = False
+    pec_droop = None
+    if model is not None and model.kind == "humpback4k":
+        pec_droop = round(float(rng.uniform(*PEC_DROOP_DEG.get(category, (10.0, 40.0)))), 2)
+    if model is not None and model.kind == "humpback4k" and category == "back_arch":
+        # the breath-then-arch series: how far the back humps (arch < 0 = back up on this model), how the tail stock
+        # curls down behind it and the head pitches down; the clearance jitter sets how much back shows
+        # the hump runs from a mild roll-through (-30) to the full arch of the middle of the motion (-80: head and
+        # tail stock under, only back and dorsal fin out); tail stock and head curl down with it
+        # apex at the dorsal fin (body fraction ~0.39 on this model), a little ahead of it early in the roll
+        params = deform.DeformParams(arch_deg=float(rng.uniform(-80.0, -30.0)), tail_curl_deg=float(rng.uniform(-30.0, -5.0)),
+                                     head_pitch_deg=float(rng.uniform(-20.0, -5.0)), lateral_deg=float(rng.uniform(-6.0, 6.0)),
+                                     arch_centre=float(rng.uniform(0.36, 0.48)), arch_span=float(rng.uniform(0.45, 0.6)))
+        procedural_bend = True
+    if model is not None:
+        geometry = None   # computed below, once the individual is known
+    else:
+        base = vertices_cm * scale if abs(scale - 1.0) > 1e-6 else vertices_cm
+        regions = fin_regions if abs(scale - 1.0) < 1e-6 else deform.fin_regions(base)
+        geometry = base if params.is_identity() else deform.deform(base, params, regions)
     skin_weights = body.get("skin_weights", {"00": 1})
     skin = weighted_choice(rng, skin_weights)
+    individual = None
+    if model is not None and model.kind == "humpback4k":
+        adults = sorted(k for k in model.individuals() if k.startswith("i"))
+        if adults:
+            individual = adults[int(rng.integers(len(adults)))]
+            skin = individual                      # the individual's texture is its skin instance
+    # Wet skin: a whale that just surfaced is glossy (water sheeting); it dulls as it dries. RoughnessScale
+    # multiplies the authored roughness (0.85 was the fixed value through run03).
+    wet_cfg = body.get("wetness", {})
+    wetness = float(rng.uniform(*wet_cfg.get("drying", [0.15, 0.5]))) if rng.uniform() < wet_cfg.get("drying_fraction", 0.15) else float(rng.uniform(*wet_cfg.get("wet", [0.55, 1.0])))
+    roughness_scale = round(0.85 - 0.6 * wetness, 3)
+    if model is not None:
+        geometry = model.posed({"body_scale": scale, "deform": deform.params_to_dict(params), "pec_droop_deg": pec_droop,
+                                "pose": {"clip_t": clip_t} | ({"bend": "procedural"} if procedural_bend else {}), "individual": individual})
     spray_cfg = config["splash"]
     if pose.splash and rng.uniform() > spray_cfg["probability"].get(category, 1.0):
         pose = replace(pose, splash=None)                      # this time, no white water
@@ -169,15 +317,26 @@ def make_shot(index: int, rng: np.random.Generator, config: dict, vertices_cm: n
                        splash_amount=pose.splash_amount * float(rng.uniform(*spray_cfg["amount_jitter"])))
     elif pose.clearance_m > 0 and rng.uniform() < spray_cfg["extra_wash_fraction"]:
         pose = replace(pose, splash="wash", splash_scale=float(rng.uniform(0.3, 0.8)), splash_amount=float(rng.uniform(0.3, 0.8)))
-    placed = poses.place(geometry, pose)
+    top_mask = (geometry[:, 0] > poses.BACK_X_MIN_CM) if category in poses.BACK_HEIGHT_CATEGORIES else None
+    placed = poses.place(geometry, pose, top_mask=top_mask)
     world = transform_mesh(geometry, placed["whale"])
-    camera = sample_camera_for_size(rng, config, pose, placed, world, 0.0)
+    companion = sample_companion(rng, config, model, category, pose, placed, geometry)
+    frame_world = np.concatenate([world, companion.pop("_world")]) if companion else world
+    camera = sample_camera_for_size(rng, config, pose, placed, frame_world, 0.0)
     no_whale = rng.uniform() < config["no_whale_in_frame_fraction"]
     if no_whale:
         camera["rotation"]["yaw"] = round(camera["rotation"]["yaw"] + rng.choice([-1, 1]) * rng.uniform(30.0, 70.0), 4)
     sun, fog, exposure, overcast = sample_lighting(rng, config, camera["rotation"]["yaw"])
+    sky, sky_sun, sky_overcast = sample_sky(rng, config, config["lighting"])
+    if sky:
+        sun, overcast = sky_sun, sky_overcast                                   # the sun follows the real sky
+    # Depth of field like a long-lens field photo: focus on the whale's above-water centroid, the
+    # f-number log-uniform in camera.aperture_f. wf_build_batch keys both on the cine camera.
+    aim = np.asarray(placed["stats"]["aim_point"], float)
+    camera["focus_distance_m"] = round(float(np.linalg.norm(aim - np.asarray(camera["location"], float))) / 100.0, 2)
+    f_lo, f_hi = config["camera"].get("aperture_f", [4.0, 11.0])
+    camera["aperture_f"] = round(float(log_uniform(rng, f_lo, f_hi)), 2)
     look = weighted_choice(rng, {name: spec["weight"] for name, spec in config["looks"].items()})
-    sea = weighted_choice(rng, config["sea_state_weights"])
     splash_spec = placed["splash"]
     shot = {
         "id": f"{index:06d}",
@@ -187,34 +346,96 @@ def make_shot(index: int, rng: np.random.Generator, config: dict, vertices_cm: n
         "no_whale_in_frame": bool(no_whale),
         "overcast": bool(overcast),
         "look": look,
-        "pose": {k: v for k, v in poses.asdict(pose).items() if k != "camera"},
+        "pose": {k: v for k, v in poses.asdict(pose).items() if k != "camera"} | ({"clip_t": clip_t} if clip_t is not None else {})
+                | ({"bend": "procedural"} if procedural_bend else {}),
+        "whale_kind": model.kind if model is not None else "k9239",
+        "individual": individual,
+        "pec_droop_deg": pec_droop,
+        "companion": companion,
         "deform": deform.params_to_dict(params),
+        "body_scale": round(scale, 4),
         "skin": skin,
+        "skin_wetness": round(wetness, 3),
+        "skin_roughness_scale": roughness_scale,
         "whale": placed["whale"],
         "camera": camera,
         "splash": splash_spec,
         "sun": sun,
+        "sky": sky,
         "fog": fog,
         "exposure_ev": exposure,
+        # Wave phase. The render freezes the water at this time (r.Water.OverrideWavesTime, keyed per
+        # shot by wf_build_batch), so the editor can put the whale and the splash on the actual surface.
+        "wave_time_s": round(float(rng.uniform(0.0, 600.0)), 3),
         "stats": placed["stats"],
         "ocean": {"vectors": dict(config["looks"][look]["vectors"])},
     }
     seastate.apply_to_shot(shot, sea, seed=index)
+    # The water surface at the shot's frozen wave time (factory.gerstner = the engine's own waves): lift the
+    # whale (with its camera, so the framing holds) by the height under its above-water centroid and the splash
+    # by the height at its centre; then the white water along the contact line on that surface.
+    waves = gerstner.generate_waves(shot["waves"]); t = shot["wave_time_s"]
+    aim = placed["stats"]["aim_point"]
+    dz = float(gerstner.surface_height(waves, aim[0], aim[1], t))
+    shot["whale"]["location"][2] = round(shot["whale"]["location"][2] + dz, 2)
+    camera["location"][2] = round(camera["location"][2] + dz, 2)
+    shot["water_surface_z_cm"] = {"whale": round(dz, 2)}
+    if companion:
+        cx, cy = companion["whale"]["location"][:2]
+        dzc = float(gerstner.surface_height(waves, cx, cy, t))
+        companion["whale"]["location"][2] = round(companion["whale"]["location"][2] + dzc, 2)
+        shot["water_surface_z_cm"]["companion"] = round(dzc, 2)
+    if splash_spec:
+        ds = float(gerstner.surface_height(waves, splash_spec["centre_cm"][0], splash_spec["centre_cm"][1], t))
+        splash_spec["centre_cm"][2] = round(splash_spec["centre_cm"][2] + ds, 2)
+        shot["water_surface_z_cm"]["splash"] = round(ds, 2)
+    shot["whitewater"] = whitewater.spec(shot, world + np.array([0.0, 0.0, dz]), waves, t, rng, config)
+    # Under a long lens the fine chop is sub-pixel: scale the water's normal-map strength down with the
+    # focal length (camera.normal_strength_focal_mm), otherwise it renders as aliased streaks.
+    ref = config["camera"].get("normal_strength_focal_mm")
+    if ref:
+        k = float(np.clip(math.sqrt(ref / max(camera["focal_mm"], 1e-6)), 0.35, 1.0))
+        scalars = shot["ocean"].setdefault("scalars", {})
+        for key in ("Default Near Normal Strength", "Default Distant Normal Strength"):
+            if key in scalars:
+                scalars[key] = round(scalars[key] * k, 4)
+        shot["ocean"]["normal_strength_scale"] = round(k, 4)
     return shot
 
 
+def posed_world(shot: dict, vertices_cm: np.ndarray, fin_regions: dict | None, model: WhaleModel | None = None) -> np.ndarray:
+    """The shot's whale in world cm (scaled, bent, posed and lifted onto the wave surface), rebuilt
+    from the shot dict exactly as make_shot built it: for mesh writers after sampling."""
+    if model is not None:
+        return transform_mesh(model.posed(shot), shot["whale"])
+    scale = float(shot.get("body_scale", 1.0))
+    base = vertices_cm * scale if abs(scale - 1.0) > 1e-6 else vertices_cm
+    params = deform.DeformParams(**shot["deform"]) if shot.get("deform") else deform.DeformParams()
+    if params.is_identity():
+        geometry = base
+    else:
+        regions = fin_regions if (abs(scale - 1.0) < 1e-6 and fin_regions is not None) else deform.fin_regions(base)
+        geometry = deform.deform(base, params, regions)
+    return transform_mesh(geometry, shot["whale"])
+
+
 def make_batches(shots: list[dict], batch_size: int) -> list[dict]:
+    # Waves and the ocean material are applied once per batch (wf_build_batch), from the first
+    # shot, so everything that varies them must be part of the grouping key: sea state, look and
+    # the focal-length normal-strength scale (binned to 0.1).
     groups: dict[tuple, list] = {}
     for shot in shots:
-        groups.setdefault((shot["sea_state"], shot["look"]), []).append(shot)
+        scale_bin = round(float(shot.get("ocean", {}).get("normal_strength_scale", 1.0)), 1)
+        groups.setdefault((shot["sea_state"], shot["look"], scale_bin), []).append(shot)
     batches = []
-    for (sea, look), members in sorted(groups.items()):
+    for (sea, look, scale_bin), members in sorted(groups.items()):
         for start in range(0, len(members), batch_size):
             chunk = members[start:start + batch_size]
             batches.append({
                 "index": len(batches),
                 "sea_state": sea,
                 "look": look,
+                "normal_strength_scale": scale_bin,
                 "waves": chunk[0]["waves"],
                 "ocean": chunk[0]["ocean"],
                 "shots": chunk,
@@ -231,13 +452,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seed", type=int, default=1)
     args = parser.parse_args(argv)
     config = json.loads(args.config.read_text())
-    vertices = poses.load_obj_vertices(args.mesh)
+    model = WhaleModel.from_config(config)
+    vertices = model.canonical if model.kind != "k9239" else poses.load_obj_vertices(args.mesh)
     regions = deform.fin_regions(vertices) if config.get("body", {}).get("deform_fraction", 0.0) > 0 else None
     rng = np.random.default_rng(args.seed)
-    shots = [make_shot(i, rng, config, vertices, regions) for i in range(args.count)]
+    shots = [make_shot(i, rng, config, vertices, regions, model if model.kind != "k9239" else None) for i in range(args.count)]
     args.out_dir.mkdir(parents=True, exist_ok=True)
     for shot in shots:
         splash.ensure_obj(shot.get("splash"), args.out_dir / "splash", shot["id"])
+        if shot.get("whitewater"):
+            whitewater.ensure_obj(shot["whitewater"], args.out_dir / "whitewater", shot["id"], posed_world(shot, vertices, regions, model if model.kind != "k9239" else None),
+                                  gerstner.generate_waves(shot["waves"]), shot.get("splash"))
     (args.out_dir / "run_config.json").write_text(json.dumps({"config": config, "seed": args.seed, "count": args.count,
                                                               "mesh": str(args.mesh)}, indent=2))
     with open(args.out_dir / "shotlist.jsonl", "w") as handle:
@@ -246,8 +471,11 @@ def main(argv: list[str] | None = None) -> int:
     batch_dir = args.out_dir / "batches"
     batch_dir.mkdir(exist_ok=True)
     batches = make_batches(shots, config["batch_size"])
+    library = islands.make_library(args.out_dir / "islands", np.random.default_rng(args.seed + 7919), config["islands"].get("library", 6)) if config.get("islands") else []
     for batch in batches:
         batch["resolution"] = config["resolution"]
+        batch["whale_kind"] = model.kind
+        batch["islands"] = islands.place(np.random.default_rng([args.seed, batch["index"]]), library, config) if library else []
         batch["frames_per_shot"] = config["frames_per_shot"]
         (batch_dir / f"batch_{batch['index']:03d}.json").write_text(json.dumps(batch))
     categories = {}

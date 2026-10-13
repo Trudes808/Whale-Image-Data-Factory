@@ -17,6 +17,14 @@ scene rebuild: ``waves`` (GerstnerWaterWaveGeneratorSimple parameters, cm and de
 and ``ocean`` (material instance parameters: surface detail, roughness). The plugin's
 crest foam switch is left off: close to the camera it renders as beige blocks.
 The label pass evaluates the same waves the water renders, so any state labels correctly.
+
+Wave phase: every shot carries ``wave_time_s`` (factory/shotlist.py) and renders with the water
+frozen at that time (r.Water.OverrideWavesTime, keyed per shot by wf_build_batch.py). Knowing
+the phase, wf_build_batch re-evaluates the generated Gerstner waves in Python and lifts the
+whale (with its camera) and the splash onto the actual surface: shotlist places both against
+the mean plane, so without this a splash sat 1 m above a trough in a rough sea and a whale's
+waterline moved with the phase. ``crest_height_m`` remains a safety margin
+(body.wave_clearance_fraction) because the surface is only matched at one point of the body.
 """
 
 from __future__ import annotations
@@ -78,6 +86,13 @@ SEA_STATES: dict[str, SeaState] = {
                       ),
 }
 DEFAULT_SEA_STATE = "light"
+
+
+def crest_height_m(name: str) -> float:
+    """Rough height of the wave crests above the mean plane for a preset (metres): about 2.5x the
+    largest per-wave amplitude, see the note on the presets. Used to lift low poses clear of the
+    waves so that a sliver meant to be visible is not washed over in a heavy sea."""
+    return 2.5 * float(SEA_STATES[name].waves["max_amplitude"]) / 100.0
 
 
 MIN_SPREAD_DEG = 120.0

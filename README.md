@@ -222,3 +222,98 @@ data/renders/run01/dataset/
 The orientation and part fields exist for the follow-up task (which part of the whale
 is seen, and from where). The projection uses the CineCamera's 23.76 mm filmback,
 calibrated against rendered masks (`factory/project.py`).
+
+## run03: body-coordinate / pose training data (2026-10-12)
+
+`factory/config/run03_bodycoords.json` (build with `tools/build_dataset.sh RUN_DIR COUNT SEED factory/config/run03_bodycoords.json`):
+
+* Framing matched to long-lens field photos: per shot a target for how much of the frame the
+  *visible* whale spans (`camera.extent_target`, log-uniform 0.3–1.6; the lens zooms to it, the whale
+  may be cut by the frame edges, `min_in_frame_fraction` 0.5), distance 40–600 m, focal 50–1500 mm.
+* Close-up and rolled categories (`factory/poses.py`): blow_sliver, fin_tip, fluke_edge, peduncle,
+  spyhop_low, roll_belly; larger pitch/roll jitter; deformation on 95 % of shots at 0.7–1.8 strength;
+  body length scale 0.55–1.1 (`body.length_scale`, shot `body_scale`; the canonical labels stay on the
+  unit mesh, the rendered mesh is scaled in the per-shot OBJ).
+* Labels per shot: 18 keypoints (`project.landmarks`: snout, chin, blowhole, dorsal fin tip/front/back,
+  tail base top/bottom, fluke notch/tips, pectoral tips/bases, belly, eyes) with pixel position, depth,
+  whale-frame and canonical 3D position and a `state` (visible / under_water / hidden / occluded /
+  out_of_frame, from the depth buffer, the rendered mask and the mean water plane); `water_row_px`;
+  `canon/` (point on the undeformed unit mesh, for correspondence) and `canon_deformed/` (point on the
+  posed, bent, scaled mesh, for pose fitting); `deform` parameters and `body_scale` in meta.
+* `python3 -m factory.qa_sheet RUN_DIR` draws the keypoint states, water row and posed mesh on a
+  contact sheet for label QA.
+* Lessons from the smoke batches (2026-10-12): keep the camera within ~180 m (the water mesh LOD
+  range; beyond it the rendered surface and the label pass disagree and a visible back gets an
+  empty mask); choose the sea state before placing the whale and lift low poses by part of the
+  crest height (`body.wave_clearance_fraction`, `seastate.crest_height_m`), otherwise slivers in
+  rough seas are washed over; keep splash meshes rare and small for close-ups (they render as large
+  white sheets near the camera); keypoint visibility uses a 5x5 neighbourhood of the mask.
+* Water physics (2026-10-12/13, after the smoke review): the cine camera's default lens clamps the
+  focal length at 1000 mm (`wf_shot.unclamp_lens`; above it the render was smaller than the labels,
+  caught by the `projection_not_covered` QA flag); each shot has a frozen wave time (`wave_time_s`,
+  a console-variable track on `r.Water.OverrideWavesTime`) and `wf_build_batch.ride_waves` lifts
+  the whale, camera and splash onto the Gerstner surface at that time (`water_surface_z_cm` in
+  meta, the batch as rendered in `raw/<batch>/batch.json`); depth of field like a field lens
+  (`camera.aperture_f`, focus on the whale's above-water centroid) softens the sharp wave bands
+  that resolved Gerstner chop shows under a long lens at grazing angles (supersampling and water
+  roughness did not); spray droplets are 2-10 cm (28 cm ones read as confetti at distance).
+* run04 to-do (from the run03 review): white water along the whale's flanks is far from real photos. A
+  diving or breathing whale pushes a bow wave and wash along the body-water contact, and the run03
+  segmentation model learns to include that turbulence in the whale (backs and tails). The splash
+  model should put foam and sub-surface turbulence along the contact line (not only crown/wash blobs
+  about one centre), with foam textures, and label it as background. Also: a bluer, darker horizon so
+  the wave bands lose contrast under long lenses; a veiled submerged body in clear water; some land
+  (islands, horizon features) in the backgrounds so the segmentation stops firing on them.
+
+## run04: realism, the rigged whale, individuals, mom + calf (2026-10-13)
+
+Config `factory/config/run04_realism.json`; end to end with `tools/run04_pipeline.sh` (render → qa →
+`Dinov3-WhaleID/scripts/run04_train.sh` → `run04_evaluate.sh`, report `experiments/run04_report.md`
+against the run03 fine-tunes).
+
+* **Whale model**: the purchased rigged 4k humpback (`third_party_assets/humpback_4k`, glTF, 25 joints,
+  one 29 s dive-then-breach clip). `factory/humpback4k.py` converts it (OBJ + textures, project frame,
+  cm); `factory/skinned.py` is the glTF loader + linear blend skinning; `factory/whalemodel.py`
+  (`WhaleModel`, config `"whale": {"kind": "humpback4k"}`) poses it per shot: a clip time `pose.clip_t`
+  sampled from per-category windows (derived from the spine joints: straight / arch / tail up /
+  head up; the bind pose itself is arched and is never used as "straight"), the front half levelled,
+  then the category's pitch/roll/yaw as before. Every rigged shot gets its posed OBJ
+  (`deform.write_batch_meshes`); postprocess/qa use `WhaleModel.posed`. The labels stay in the K9239
+  canonical frame: the rest pose is registered slice-wise to the K9239 mesh (`register_to`), so body
+  coordinates and the 18 keypoints keep their meaning (`WhaleModel.landmark_indices`: geometric picks
+  plus rig joints for the pectorals and the K9239 eyes mapped through the canonical frame). The
+  file's two "jingxu" (baleen) block meshes are dropped. In the editor `wf_shot.ensure_humpback4k_materials`
+  builds the skin material (same graph as the K9239 one: BaseColor parameter, RoughnessScale for the
+  wetness track, normal map) and one instance per skin texture, lazily, and rebuilds them when the
+  source textures change (stamp in `Saved/wf_humpback4k_import.json`).
+* **Individuals** (`factory/individuals.py`, `python3 -m factory.individuals --count 12 --calves 4`):
+  copies of the model with their own proportions (rostrum, girth, tail stock, fluke span, pectoral
+  length), resting joint angles around the keypoints (fluke pitch, tail stock, head, pectorals), fluke
+  outline (sweep, notch depth, trailing-edge wear and nicks) and colouring (a `factory/skin.py`
+  variant plus a Katona class 1–5 fluke underside painted on the UV island). Library
+  `third_party_assets/humpback_4k/individuals.json`, textures `skins/T_Humpback_BaseColor_<id>.png`;
+  a shot carries `individual` and `skin` = the id. Vertex i stays canonical vertex i.
+* **Mom + calf** (`companion` in the config): a calf individual (`c..`, scale 0.35–0.5, chubbier) beside
+  the mother on 18 % of the surface shots, roughly her heading, placed off her flank on the wave
+  surface; the camera frames both. It renders with custom stencil 3 → 0.6 in the label pass
+  (`M_WhaleVisibleMask`; after a shader change rebuild it with `tools/run_editor_script.sh rebuild_labels`).
+  `masks/` keeps every whale as class 1 (segmentation), `instances/<id>.png` tells 1 = the shot's whale,
+  2 = the calf, and the mother's amodal/body-coordinate labels are cleared under the calf. The
+  Dinov3 loaders crop on the primary instance.
+* **White water**: the foam carpet has lumpy thickness (up to ~10 cm where dense), the material carves holes from the foam texture, and stronger
+  break-up, so it reads as a raised rim at grazing angles instead of a flat line; empty carpets are
+  skipped. Known open point: long-lens wave bands (see run03) are unchanged by the model switch.
+* **Poses on the rig** (after the first test renders): the clip is sampled at hand-picked keyframes per
+  category (`whalemodel.KEYFRAMES`), never at arbitrary frames of the breach sequence; the tail-up categories
+  take most of the frame's own fluke lift out of their nose-down pitch. `back_arch` is the commonest field
+  shot (breath, then the back and dorsal fin rolling through with head and flukes under): a straight keyframe
+  plus the procedural hump (`arch_deg` -30..-80, apex `arch_centre` at the dorsal fin, head and tail stock
+  curled down), clearance measured on the back only. Pectoral angle is a per-shot `pec_droop_deg` applied at
+  vertex level in the levelled frame with a mesh-smoothed fin membership (surface whales carry the fins
+  down, the rolled categories raise one). None of the K9239 procedural parameters (fin rotation, twist,
+  lateral) apply to the rig: its fin heuristic tears this mesh at the shoulder. Individual edits are made in
+  the skinned rest frame and mapped back through each vertex's blended skin matrix
+  (`Rig.bind_from_rest`); a seam stitch closes the few centimetre-scale edges the asset's own skinning
+  overstretches. An edge-stretch tear check over all categories (max ~2x on tiny edges) is the acceptance
+  test for any new pose code.
+* Test renders: `data/renders/h4k_test*` (rigged model, individuals, calves, keyframes, back arch).

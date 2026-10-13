@@ -272,13 +272,16 @@ def make_whale_material() -> unreal.Material:
 
 
 LABEL_SHADER = r"""
-// Whale pixel?  (custom stencil written only by the whale)
-if (abs(Stencil.r - WHALE_STENCIL) > 0.5) return 0;
+// Whale pixel?  (custom stencil written only by the whales: 1 the shot's whale, 3 a companion)
+float Who = 0.0;
+if (abs(Stencil.r - WHALE_STENCIL) < 0.5) Who = 1.0;
+else if (abs(Stencil.r - COMPANION_STENCIL) < 0.5) Who = 0.6;
+else return 0;
 // Something opaque (boat, island, ...) in front of the whale?
 if (CDepth.r > SDepth.r * 1.0005 + 1.0) return 0;
 
 #if !ANALYTIC_WAVES
-return 1;  // the ocean is opaque in this pass, so the SceneDepth test above covered it
+return Who;  // the ocean is opaque in this pass, so the SceneDepth test above covered it
 #endif
 // The water surface is not in SceneDepth here, so test it analytically: rebuild the whale
 // point from custom depth and march the camera ray, comparing against the exact Gerstner
@@ -299,6 +302,10 @@ float fBand = 1.0;
 if (CamPos.z > Ceiling && CamPos.z > P.z)
     fBand = saturate((Ceiling - P.z) / (CamPos.z - P.z));   // fraction of the ray (from P) below Ceiling
 float tStart = RayLength * (1.0 - fBand);
+// Only the water near the whale (NEAR_CM back along the ray) is tested: the analytic surface and the
+// rendered water mesh agree there. Far from the whale the mesh is coarser and the exact surface can
+// show a crest the render never draws, which hid whole whales from low cameras in rough seas.
+tStart = max(tStart, RayLength - NEAR_CM);
 for (int i = Steps; i >= 0; i--)  // whale point first, then back toward the camera
 {
     float3 S = CamPos + Dir * (tStart + (RayLength - tStart) * i / Steps);
@@ -317,7 +324,7 @@ for (int i = Steps; i >= 0; i--)  // whale point first, then back toward the cam
     Wave = GetAllGerstnerWavesNew(BODY_INDEX, WaterTime, DFPromote(Q));
     if (S.z < BASE_Z + Wave.WPO.z - 0.1) return 0;
 }
-return 1;
+return Who;
 """
 
 
@@ -361,7 +368,7 @@ def make_label_material(path: str = LABEL_MATERIAL, analytic_waves: bool = True)
     custom.set_editor_property("description", "WhaleVisible")
     custom.set_editor_property("include_file_paths", ["/Plugin/Water/Private/GerstnerWaveFunctions.ush"])
     defines = []
-    for name, value in (("WHALE_STENCIL", f"{WHALE_STENCIL}.0"), ("BODY_INDEX", str(WATER_BODY_INDEX)),
+    for name, value in (("WHALE_STENCIL", f"{WHALE_STENCIL}.0"), ("COMPANION_STENCIL", f"{wf_shot.COMPANION_STENCIL}.0"), ("BODY_INDEX", str(WATER_BODY_INDEX)), ("NEAR_CM", "2500.0"),
                         ("BASE_Z", f"{WATER_SURFACE_Z:.3f}"), ("ANALYTIC_WAVES", "1" if analytic_waves else "0")):
         define = unreal.CustomDefine()
         define.set_editor_property("define_name", name)
@@ -660,8 +667,9 @@ def main() -> None:
     log("OK")
 
 
-try:
-    main()
-finally:
-    if os.environ.get("WF_QUIT_WHEN_DONE"):
-        unreal.SystemLibrary.quit_editor()
+if not os.environ.get("WF_IMPORT_ONLY"):          # wf_rebuild_labels imports this module for its builders
+    try:
+        main()
+    finally:
+        if os.environ.get("WF_QUIT_WHEN_DONE"):
+            unreal.SystemLibrary.quit_editor()

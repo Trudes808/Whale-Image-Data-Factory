@@ -26,7 +26,7 @@ def log(message: str) -> None:
 
 
 def make_config(name: str, with_label: bool, label_material: str = LABEL_MATERIAL, warmup: int = WARMUP_FRAMES,
-                resolution=(WIDTH, HEIGHT)) -> None:
+                resolution=(WIDTH, HEIGHT), spatial_samples: int = 1) -> None:
     path = f"{CONFIG_DIR}/{name}"
     if unreal.EditorAssetLibrary.does_asset_exist(path):
         unreal.EditorAssetLibrary.delete_asset(path)
@@ -57,7 +57,7 @@ def make_config(name: str, with_label: bool, label_material: str = LABEL_MATERIA
     aa.set_editor_property("engine_warm_up_count", warmup)
     aa.set_editor_property("render_warm_up_count", warmup)
     aa.set_editor_property("render_warm_up_frames", True)
-    aa.set_editor_property("spatial_sample_count", 1)
+    aa.set_editor_property("spatial_sample_count", int(spatial_samples))   # > 1 supersamples each frame (run03: fine wave chop under long lenses aliased into streaks)
     aa.set_editor_property("temporal_sample_count", 1)
 
     settings = [s.get_class().get_name() for s in config.get_all_settings()]
@@ -72,6 +72,9 @@ def main() -> None:
     # Dataset batches (tools/render_batch.sh): many camera cuts per sequence, so a shorter
     # per-cut warm-up; MRQ warms up at every camera cut.
     make_config("MRQ_Batch", with_label=True, warmup=BATCH_WARMUP_FRAMES)
+    # supersampled variants for the run03 anti-aliasing test (WF_RENDER_CONFIG=MRQ_Batch_AA4)
+    for n in (2, 4):
+        make_config(f"MRQ_Batch_AA{n}", with_label=True, warmup=BATCH_WARMUP_FRAMES, spatial_samples=n)
     log("OK")
 
 

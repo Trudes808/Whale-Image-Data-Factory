@@ -77,7 +77,28 @@ POSES: dict[str, Pose] = {
                   Camera(100.0, 60.0, 3.0, 50.0)),
     "submerged": Pose(0.0, 0.0, -0.5, "just below the surface: a negative (no visible whale)",
                       Camera(100.0, 60.0, 3.0, 50.0)),
+    # run03: close-ups where only a part of the whale shows, and rolled whales (the hard views in field photos)
+    "blow_sliver": Pose(6.0, 0.0, 0.45, "just the blowhole and the top of the back break the surface",
+                        Camera(70.0, 60.0, 3.0, 85.0), splash="wash", splash_scale=0.35, splash_amount=0.4),
+    "fin_tip": Pose(0.0, 82.0, 0.7, "rolled on one side, only the pectoral fin tip above the water",
+                    Camera(90.0, 55.0, 3.0, 85.0), splash="crown", splash_scale=0.3, splash_amount=0.4),
+    "fluke_edge": Pose(-72.0, 0.0, 1.1, "end of the dive: only the fluke tips are still above the water",
+                       Camera(180.0, 60.0, 3.0, 85.0), splash="crown", splash_scale=0.35, splash_amount=0.5),
+    "peduncle": Pose(-35.0, 0.0, 2.0, "tail stock arched high before the flukes come up",
+                     Camera(140.0, 60.0, 3.0, 85.0), splash="wash", splash_scale=0.5, splash_amount=0.5),
+    "spyhop_low": Pose(72.0, 0.0, 1.3, "only the rostrum out of the water",
+                       Camera(30.0, 50.0, 3.0, 85.0), splash="wash", splash_scale=0.4, splash_amount=0.4),
+    "roll_belly": Pose(0.0, 160.0, 1.2, "rolled belly-up at the surface, fins in the air",
+                       Camera(90.0, 55.0, 3.0, 85.0), splash="crown", splash_scale=0.5, splash_amount=0.6),
+    # run04: the commonest field shot. The whale breathes, then arches: blowhole, back and dorsal fin clearly out
+    # of the water as it slides through and resubmerges. The body shape comes from the start of the rig's clip;
+    # the clearance is measured on the back (flukes excluded), so how much back shows varies while the flukes stay under.
+    "back_arch": Pose(-5.0, 0.0, 1.1, "breath then arch: blowhole to dorsal fin and back out of the water, sliding through",
+                      Camera(100.0, 60.0, 3.0, 50.0), splash="wash", splash_scale=0.5, splash_amount=0.5),
 }
+# categories whose clearance is measured on the back only (body-frame x > BACK_X_MIN_CM: no flukes / tail stock)
+BACK_HEIGHT_CATEGORIES = {"back_arch"}
+BACK_X_MIN_CM = -350.0
 
 
 def load_obj_vertices(path: str | Path) -> np.ndarray:
@@ -107,10 +128,12 @@ def rotation_matrix(roll_deg: float, pitch_deg: float, yaw_deg: float) -> np.nda
     ])
 
 
-def place(vertices_cm: np.ndarray, pose: Pose, water_z_cm: float = 0.0) -> dict:
-    """Whale transform for a pose, and the camera that frames it. All values in cm/deg."""
+def place(vertices_cm: np.ndarray, pose: Pose, water_z_cm: float = 0.0, top_mask: np.ndarray | None = None) -> dict:
+    """Whale transform for a pose, and the camera that frames it. All values in cm/deg. ``top_mask`` selects
+    the vertices whose highest point sits at the clearance (default: the whole whale)."""
     rotated = vertices_cm @ rotation_matrix(pose.roll_deg, pose.pitch_deg, pose.yaw_deg)
-    location = np.array([0.0, 0.0, water_z_cm + pose.clearance_m * 100.0 - rotated[:, 2].max()])
+    top = rotated[top_mask] if top_mask is not None and top_mask.any() else rotated
+    location = np.array([0.0, 0.0, water_z_cm + pose.clearance_m * 100.0 - top[:, 2].max()])
     world = rotated + location
     above = world[world[:, 2] > water_z_cm]
     above_fraction = float(len(above) / len(world))

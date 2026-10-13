@@ -1,0 +1,247 @@
+{
+  "description": "run03_bodycoords: body-coordinate / pose training. Framing matched to long-lens field photos (visible whale spans 0.3-1.6 of the frame, cut by the edges allowed), close-up and rolled categories, stronger bends, calf-to-adult sizes, keypoints with visibility states, canonical + deformed per-pixel maps. Distance capped at 180 m (water mesh LOD range); the long-lens look comes from the focal length.",
+  "resolution": [
+    1280,
+    720
+  ],
+  "frames_per_shot": 3,
+  "batch_size": 50,
+  "pose_weights": {
+    "logging": 12,
+    "blow": 10,
+    "arch": 9,
+    "fluke_up": 10,
+    "breach": 5,
+    "pec_up": 6,
+    "spyhop": 3,
+    "awash": 8,
+    "submerged": 3,
+    "blow_sliver": 8,
+    "fin_tip": 6,
+    "fluke_edge": 7,
+    "peduncle": 6,
+    "spyhop_low": 3,
+    "roll_belly": 4
+  },
+  "pose_jitter": {
+    "pitch_deg": 15,
+    "roll_deg": 25,
+    "breach_roll_deg": 60,
+    "clearance_scale": [
+      0.5,
+      1.6
+    ]
+  },
+  "no_whale_in_frame_fraction": 0.03,
+  "camera": {
+    "distance_m": [
+      40,
+      180
+    ],
+    "boat_height_m": [
+      1.5,
+      4.5
+    ],
+    "elevated_fraction": 0.12,
+    "elevated_height_m": [
+      6,
+      40
+    ],
+    "fill_fraction": [
+      0.3,
+      0.85
+    ],
+    "focal_mm": [
+      50,
+      1500
+    ],
+    "aim_jitter_frame_fraction": 0.25,
+    "roll_deg": 5,
+    "min_extent_frame_fraction": 0.0,
+    "min_in_frame_fraction": 0.5,
+    "max_camera_tries": 40,
+    "extent_target": [
+      0.3,
+      1.6
+    ],
+    "normal_strength_focal_mm": 250,
+    "aperture_f": [
+      4.0,
+      11.0
+    ]
+  },
+  "sea_state_weights": {
+    "glassy": 8,
+    "calm": 12,
+    "light": 25,
+    "moderate": 30,
+    "rough": 25
+  },
+  "looks": {
+    "deep_blue": {
+      "weight": 35,
+      "vectors": {
+        "Absorption": [
+          5,
+          25,
+          90,
+          8
+        ],
+        "Scattering": [
+          0.5,
+          0.7,
+          1.0,
+          0.06
+        ],
+        "Water Albedo": [
+          0.25,
+          0.45,
+          0.8,
+          0.5
+        ]
+      }
+    },
+    "open_blue": {
+      "weight": 20,
+      "vectors": {
+        "Absorption": [
+          6,
+          40,
+          140,
+          8
+        ],
+        "Scattering": [
+          0.6,
+          0.8,
+          1.0,
+          0.12
+        ],
+        "Water Albedo": [
+          0.35,
+          0.55,
+          0.85,
+          0.5
+        ]
+      }
+    },
+    "coastal_green": {
+      "weight": 20,
+      "vectors": {
+        "Absorption": [
+          8,
+          70,
+          60,
+          8
+        ],
+        "Scattering": [
+          0.6,
+          1.0,
+          0.8,
+          0.3
+        ],
+        "Water Albedo": [
+          0.4,
+          0.7,
+          0.6,
+          0.5
+        ]
+      }
+    },
+    "grey": {
+      "weight": 25,
+      "vectors": {
+        "Absorption": [
+          6,
+          40,
+          140,
+          8
+        ],
+        "Scattering": [
+          0.8,
+          0.9,
+          1.0,
+          0.15
+        ],
+        "Water Albedo": [
+          0.6,
+          0.65,
+          0.7,
+          0.5
+        ]
+      }
+    }
+  },
+  "lighting": {
+    "sun_elevation_deg": [
+      2,
+      80
+    ],
+    "overcast_fraction": 0.35,
+    "clear_intensity": [
+      7,
+      12
+    ],
+    "overcast_intensity": [
+      1.5,
+      4.5
+    ],
+    "fog_density": [
+      0.0005,
+      0.03
+    ],
+    "exposure_ev": [
+      -1.5,
+      1.5
+    ]
+  },
+  "splash": {
+    "probability": {
+      "breach": 0.6,
+      "fluke_up": 0.3,
+      "pec_up": 0.2,
+      "spyhop": 0.2,
+      "arch": 0.15,
+      "blow": 0.15,
+      "logging": 0.0,
+      "awash": 0.0,
+      "blow_sliver": 0.0,
+      "fin_tip": 0.0,
+      "fluke_edge": 0.0,
+      "peduncle": 0.0,
+      "spyhop_low": 0.0,
+      "roll_belly": 0.0
+    },
+    "scale_jitter": [
+      0.4,
+      1.0
+    ],
+    "amount_jitter": [
+      0.3,
+      1.0
+    ],
+    "extra_wash_fraction": 0.02
+  },
+  "body": {
+    "deform_fraction": 0.95,
+    "strength": [
+      0.7,
+      1.8
+    ],
+    "skin_weights": {
+      "00": 25,
+      "01": 15,
+      "02": 15,
+      "03": 15,
+      "04": 15,
+      "05": 15
+    },
+    "length_scale": [
+      0.55,
+      1.1
+    ],
+    "wave_clearance_fraction": 0.3
+  },
+  "labels": {
+    "through_water_depth_m": 1.5
+  }
+}
