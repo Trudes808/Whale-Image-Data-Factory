@@ -33,11 +33,33 @@ for batch in "$@"; do
     rm -rf -- "$out_dir"
     mkdir -p -- "$out_dir"
     # build_batch writes the batch as rendered (whale, camera and splash on the wave surface) to raw/<batch>/batch.json.
-    WF_BATCH_JSON="$mesh_dir/batch.json" WF_BATCH_SOURCE="$batch" WF_BATCH_ADJUSTED="$out_dir/batch.json" \
-        "$WF_REPO_ROOT/tools/run_editor_script.sh" build_batch
-    [ -f "$out_dir/batch.json" ] || { echo "render_batch: build_batch wrote no adjusted batch for $name" >&2; exit 1; }
-    WF_RENDER_CONFIG="$config" WF_RENDER_TIMEOUT_S="${WF_RENDER_TIMEOUT_S:-7200}" \
-        "$WF_REPO_ROOT/tools/render_sequence.sh" /Game/WhaleFactory/Sequences/LS_Batch "$out_dir" | tail -1
+    # The editor occasionally dies at startup (an engine-internal assertion in its HTTP client thread; twice in
+    # 220 run04 batches): one retry of the build step, as of the render below, instead of stopping a day-long run.
+    for attempt in 1 2; do
+        WF_BATCH_JSON="$mesh_dir/batch.json" WF_BATCH_SOURCE="$batch" WF_BATCH_ADJUSTED="$out_dir/batch.json" \
+            "$WF_REPO_ROOT/tools/run_editor_script.sh" build_batch || true
+        [ -f "$out_dir/batch.json" ] && break
+        if [ "$attempt" -eq 1 ]; then
+            echo "render_batch: build_batch wrote no adjusted batch for $name (attempt 1), retrying once" >&2
+            sleep 15
+        else
+            echo "render_batch: build_batch wrote no adjusted batch for $name twice" >&2
+            exit 1
+        fi
+    done
+    # Same retry for the render step.
+    for attempt in 1 2; do
+        if WF_RENDER_CONFIG="$config" WF_RENDER_TIMEOUT_S="${WF_RENDER_TIMEOUT_S:-7200}" \
+            "$WF_REPO_ROOT/tools/render_sequence.sh" /Game/WhaleFactory/Sequences/LS_Batch "$out_dir" | tail -1; then
+            break
+        elif [ "$attempt" -eq 1 ]; then
+            echo "render_batch: render of $name failed (attempt 1), retrying once" >&2
+            sleep 15
+        else
+            echo "render_batch: render of $name failed twice" >&2
+            exit 1
+        fi
+    done
     rm -rf -- "$mesh_dir"
     date -u +%FT%TZ > "$out_dir/done"
 done

@@ -57,6 +57,8 @@ class Individual:
     fluke_notch_cm: float = 0.0     # extra depth of the central notch
     fluke_edge_cm: float = 0.0      # trailing-edge wear amplitude (scallops, nicks)
     pec_len: float = 1.0            # pectoral length scale
+    dorsal_height: float = 1.0      # dorsal fin height scale (the asset's fin is a small one; real fins run stubby to tall and falcate)
+    dorsal_sweep_cm: float = 0.0    # dorsal fin tip moved back (+) or forward (-)
     joint_deg: dict = field(default_factory=dict)   # joint name -> [roll, pitch, yaw] degrees (project axes x, y, z)
     skin_variant_seed: int = 0      # factory.skin colouring/scars seed
     fluke_class: int = 3            # 1 (white) .. 5 (black)
@@ -79,6 +81,7 @@ def sample(rng: np.random.Generator, id: str, calf: bool = False) -> Individual:
     else:
         ind.head_len = float(rng.uniform(0.92, 1.08)); ind.girth = float(rng.uniform(0.93, 1.07)); ind.peduncle = float(rng.uniform(0.9, 1.1))
         ind.fluke_span = float(rng.uniform(0.9, 1.12)); ind.pec_len = float(rng.uniform(0.92, 1.1))
+    ind.dorsal_height = float(rng.uniform(0.8, 1.2)) if calf else float(rng.uniform(0.7, 1.6)); ind.dorsal_sweep_cm = float(rng.uniform(-15, 15))
     ind.fluke_sweep_cm = float(rng.uniform(-20, 25)); ind.fluke_notch_cm = float(rng.uniform(0, 18)); ind.fluke_edge_cm = float(rng.uniform(0, 12) ** 1.3 / 12 ** 0.3)
     deg = {}
     # resting angles around the keypoints: fluke pitch, tail-stock set, head set, pectoral set; small, per joint
@@ -156,6 +159,21 @@ def apply_rest(V: np.ndarray, ind: Individual, joints: dict, regions: dict) -> n
         yc = float(rng.uniform(-span_max * 0.9, span_max * 0.9)); wd = float(rng.uniform(6, 18)); dp = float(rng.uniform(4, 14))
         nick += dp * np.exp(-((y - yc) / wd) ** 2)
     V[:, 0] = x + te * (notch + np.clip(wear, -ind.fluke_edge_cm, ind.fluke_edge_cm) + nick)
+    # 3b. dorsal fin: height about the local back line and tip sweep, on the thin midline part of the fin only
+    if abs(ind.dorsal_height - 1.0) > 1e-6 or abs(ind.dorsal_sweep_cm) > 1e-6:
+        xr = (x > joints["joint59_08"][0] - 60) & (x < joints["joint56_05"][0] + 40)      # the fin's stretch of back
+        side = xr & (np.abs(y) > 25) & (np.abs(y) < 60)
+        if side.any():
+            bins = np.linspace(x[xr].min(), x[xr].max(), 12)
+            centres = (bins[:-1] + bins[1:]) / 2
+            back = np.array([np.percentile(z[side & (x >= a) & (x < b)], 90) if (side & (x >= a) & (x < b)).any() else np.nan for a, b in zip(bins[:-1], bins[1:])])
+            okb = ~np.isnan(back)
+            back_line = np.interp(x, centres[okb], back[okb])
+            h = z - back_line
+            wd = _smooth(h, 4.0, 18.0) * xr * (np.abs(y) < 30)
+            V[:, 2] = z + (ind.dorsal_height - 1.0) * np.clip(h, 0, None) * wd
+            V[:, 0] = x - ind.dorsal_sweep_cm * wd * np.clip(h, 0, None) / max(float(np.clip(h, 0, None).max()), 1.0)
+            x, z = V[:, 0], V[:, 2]
     # 4. pectoral length about the fin root along the fin axis
     for side, root_name, tip_name in (("pec_left", PEC_LEFT[0], PEC_LEFT[-1]), ("pec_right", PEC_RIGHT[0], PEC_RIGHT[-1])):
         w = regions.get(side)                       # per-vertex chain skin weight (smooth), or None for meshes without fins
@@ -270,7 +288,9 @@ def write_texture(ind: Individual, rig, out_dir: Path = SKINS_DIR, base_texture:
     img = paint_fluke(img, mask, grad, ind.fluke_class, ind.fluke_pattern_seed)
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"T_Humpback_BaseColor_{ind.id}.png"
-    Image.fromarray(img).save(path)
+    tmp = path.with_suffix(".tmp.png")                    # atomic: a render may import the file at any moment
+    Image.fromarray(img).save(tmp)
+    tmp.replace(path)
     return path
 
 

@@ -348,3 +348,22 @@ def check_against_mask(amodal: np.ndarray, visible_mask: np.ndarray) -> dict:
     return {"visible_pixels": int(visible_mask.sum()), "amodal_pixels": int(amodal_b.sum()),
             "visible_inside_amodal": round(inside, 4),
             "visible_fraction": round(float(visible_mask.sum() / max(amodal_b.sum(), 1)), 4)}
+
+
+def spine_curve(posed_cm: np.ndarray, canonical_cm: np.ndarray, n_slices: int = 13) -> dict:
+    """A model-independent description of how the body is bent: the posed centroids of n_slices slices of
+    the body along its canonical length (tail -> snout), in the whale frame (cm), with the pitch (xz) and
+    yaw (xy) angle of every segment, degrees, relative to the straight canonical body. Lets a model learn
+    the body's bend directly from the picture (whatever produced it: clip, hump, rig offsets)."""
+    x = canonical_cm[:, 0]; lo, hi = float(x.min()), float(x.max())
+    edges = np.linspace(lo, hi, n_slices + 1)
+    pts = []
+    for a, b in zip(edges[:-1], edges[1:]):
+        sel = (x >= a) & (x < b) if b < hi else (x >= a) & (x <= b)
+        pts.append(posed_cm[sel].mean(0) if sel.any() else np.array([np.nan] * 3))
+    pts = np.array(pts)
+    seg = np.diff(pts, axis=0)
+    pitch = np.degrees(np.arctan2(seg[:, 2], np.maximum(seg[:, 0], 1e-6)))
+    yaw = np.degrees(np.arctan2(seg[:, 1], np.maximum(seg[:, 0], 1e-6)))
+    return {"slices": n_slices, "points_cm": np.round(pts, 1).tolist(), "segment_pitch_deg": np.round(pitch, 2).tolist(),
+            "segment_yaw_deg": np.round(yaw, 2).tolist(), "fraction": np.round((edges[:-1] + edges[1:]) / 2.0, 1).tolist()}

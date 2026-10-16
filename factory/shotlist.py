@@ -50,11 +50,15 @@ def sample_pose(rng: np.random.Generator, config: dict) -> tuple[str, poses.Pose
     name = weighted_choice(rng, config["pose_weights"])
     base = poses.POSES[name]
     jitter = config["pose_jitter"]
-    roll_jitter = jitter["breach_roll_deg"] if name == "breach" else jitter["roll_deg"]
+    roll_jitter = jitter["breach_roll_deg"] if name == "breach" else jitter.get("roll_deg_by_category", {}).get(name, jitter["roll_deg"])
+    pitch_jitter = jitter.get("pitch_deg_by_category", {}).get(name, jitter["pitch_deg"])     # a level surfacing stays level
     lo, hi = jitter["clearance_scale"]
     clearance = base.clearance_m * rng.uniform(lo, hi) if base.clearance_m > 0 else base.clearance_m * rng.uniform(0.5, 3.0)
+    cap = jitter.get("clearance_max_m", {}).get(name)          # resting / breathing whales never show more than the back
+    if cap is not None:
+        clearance = min(clearance, float(cap))
     pose = replace(base,
-                   pitch_deg=base.pitch_deg + rng.uniform(-jitter["pitch_deg"], jitter["pitch_deg"]),
+                   pitch_deg=base.pitch_deg + rng.uniform(-pitch_jitter, pitch_jitter),
                    roll_deg=base.roll_deg + rng.uniform(-roll_jitter, roll_jitter),
                    clearance_m=clearance,
                    yaw_deg=float(rng.uniform(0.0, 360.0)))
@@ -69,7 +73,15 @@ def sample_camera(rng: np.random.Generator, config: dict, pose: poses.Pose, plac
     distance_m = log_uniform(rng, *cam["distance_m"])
     elevated = rng.uniform() < cam["elevated_fraction"]
     height_m = rng.uniform(*(cam["elevated_height_m"] if elevated else cam["boat_height_m"]))
-    bearing = rng.uniform(0.0, 360.0)
+    # Camera bearing about the whale: 0 = ahead of the nose, 90 / 270 = alongside, 180 = behind. Field photos are
+    # mostly taken following the whale or running alongside it, so camera.bearing_sectors weights the sectors
+    # ([start, end, weight] in degrees, uniform within a sector); without it the bearing is uniform all round.
+    sectors = cam.get("bearing_sectors")
+    if sectors:
+        weights = np.array([float(sec[2]) for sec in sectors]); sec = sectors[int(rng.choice(len(sectors), p=weights / weights.sum()))]
+        bearing = float(rng.uniform(sec[0], sec[1])) % 360.0
+    else:
+        bearing = rng.uniform(0.0, 360.0)
     aim = np.array(placed["stats"]["aim_point"], float)
     angle = math.radians(pose.yaw_deg + bearing)
     location = aim + np.array([math.cos(angle) * distance_m * 100.0, math.sin(angle) * distance_m * 100.0, 0.0])
@@ -83,7 +95,7 @@ def sample_camera(rng: np.random.Generator, config: dict, pose: poses.Pose, plac
     rotation["yaw"] = round(rotation["yaw"] + rng.uniform(-1, 1) * cam["aim_jitter_frame_fraction"] * hfov / 2, 4)
     rotation["pitch"] = round(rotation["pitch"] + rng.uniform(-1, 1) * cam["aim_jitter_frame_fraction"] * hfov * 9 / 16 / 2, 4)
     rotation["roll"] = round(float(rng.uniform(-cam["roll_deg"], cam["roll_deg"])), 3)
-    return {"location": location.round(2).tolist(), "rotation": rotation, "focal_mm": round(focal, 2),
+    return {"location": location.round(2).tolist(), "rotation": rotation, "focal_mm": round(focal, 2), "bearing_deg": round(bearing, 2),
             "bearing_deg": round(bearing, 2), "distance_m": round(distance_m, 2), "height_m": round(height_m, 2),
             "elevated": bool(elevated), "fill_fraction": round(fill, 3)}
 
@@ -202,8 +214,36 @@ def sample_sky(rng: np.random.Generator, config: dict, light: dict) -> tuple[dic
 # rolled categories keep them out so the roll raises one
 PEC_DROOP_DEG = {"pec_up": (-35.0, 5.0), "fin_tip": (-25.0, 10.0), "roll_belly": (-20.0, 10.0), "breach": (-20.0, 20.0),
                  "spyhop": (0.0, 20.0), "spyhop_low": (0.0, 20.0)}
-COMPANION_CATEGORIES = {"logging", "blow", "blow_sliver", "awash", "arch", "back_arch", "peduncle", "fluke_up", "pec_up", "fin_tip"}
-CALF_CATEGORIES = {"logging": 0.3, "blow": 0.3, "awash": 0.15, "back_arch": 0.25}
+WAVE_TIME_S = 0.0                 # the frozen wave time of every render (DefaultEngine.ini r.Water.OverrideWavesTime)
+SCENE_OFFSET_CM = 15000.0         # the scene is translated by up to this (each axis) to vary the wave phase under it
+HEAD_UNDER_CATEGORIES = {"fluke_down", "fluke_up", "fluke_edge"}       # fluking dives: the head is never out of the water
+COMPANION_CATEGORIES = {"logging", "blow", "blow_sliver", "awash", "arch", "back_arch", "surface", "peduncle", "fluke_up", "fluke_down", "pec_up", "fin_tip"}
+CALF_CATEGORIES = {"logging": 0.3, "blow": 0.3, "awash": 0.15, "back_arch": 0.25, "surface": 0.25}
+# Procedural surface poses for the rig: a straight keyframe plus a hump along the spine (deform.DeformParams; on this
+# model arch < 0 = back up, head_pitch < 0 = snout down, tail_curl < 0 = flukes down). Ranges per category; a config
+# "procedural_poses" section adds or overrides categories.
+PROCEDURAL_POSES = {
+    # the breath-then-arch series: from a mild roll-through (-30) to the full arch of the middle of the motion (-80:
+    # head and tail stock under, only back and dorsal fin out); apex at the dorsal fin (body fraction ~0.39)
+    "back_arch": dict(arch_deg=(-80.0, -30.0), tail_curl_deg=(-30.0, -5.0), head_pitch_deg=(-20.0, -5.0), lateral_deg=(-6.0, 6.0),
+                      arch_centre=(0.36, 0.48), arch_span=(0.45, 0.6)),
+    # level surfacing (run05): a mild hump so the back from the peduncle to the blowhole is out while the head stays low,
+    # as in real surfacing photos (the rostrum is 1 % of the whale pixels photographed in the field, 39 % of run04's)
+    # (the straight keyframes carry the head high and the dorsal fin low, so the apex must sit at the dorsal fin, body
+    # fraction ~0.39, and the head must pitch well down: a milder back_arch, not a level body)
+    "surface": dict(arch_deg=(-55.0, -30.0), tail_curl_deg=(-25.0, -8.0), head_pitch_deg=(-30.0, -12.0), lateral_deg=(-6.0, 6.0),
+                    arch_centre=(0.36, 0.42), arch_span=(0.45, 0.6)),
+    # the breathing / resting categories (run05): the same back-apex recipe, the clearance cap in the config sets how
+    # much back shows (blow: apex a little forward so the blowhole breaks the surface; sliver / awash: the top of the back)
+    "logging": dict(arch_deg=(-45.0, -25.0), tail_curl_deg=(-20.0, -5.0), head_pitch_deg=(-28.0, -12.0), lateral_deg=(-5.0, 5.0),
+                    arch_centre=(0.36, 0.42), arch_span=(0.5, 0.65)),
+    "blow": dict(arch_deg=(-55.0, -30.0), tail_curl_deg=(-25.0, -8.0), head_pitch_deg=(-30.0, -14.0), lateral_deg=(-6.0, 6.0),
+                 arch_centre=(0.38, 0.44), arch_span=(0.45, 0.6)),
+    "blow_sliver": dict(arch_deg=(-55.0, -30.0), tail_curl_deg=(-25.0, -8.0), head_pitch_deg=(-30.0, -12.0), lateral_deg=(-6.0, 6.0),
+                        arch_centre=(0.36, 0.44), arch_span=(0.45, 0.6)),
+    "awash": dict(arch_deg=(-55.0, -30.0), tail_curl_deg=(-25.0, -8.0), head_pitch_deg=(-30.0, -12.0), lateral_deg=(-6.0, 6.0),
+                  arch_centre=(0.36, 0.44), arch_span=(0.45, 0.6)),
+}
 
 
 def sample_companion(rng: np.random.Generator, config: dict, model, category: str, pose: poses.Pose, placed: dict,
@@ -224,9 +264,11 @@ def sample_companion(rng: np.random.Generator, config: dict, model, category: st
     scale = float(rng.uniform(*cfg.get("scale", [0.35, 0.5])))
     ccat = weighted_choice(rng, CALF_CATEGORIES)
     base = poses.POSES[ccat]; jitter = config["pose_jitter"]
+    cclear = (base.clearance_m * rng.uniform(*jitter["clearance_scale"]) if base.clearance_m > 0 else base.clearance_m * rng.uniform(0.5, 2.0))
+    ccap = jitter.get("clearance_max_m", {}).get(ccat)
     cpose = replace(base, pitch_deg=base.pitch_deg + rng.uniform(-jitter["pitch_deg"], jitter["pitch_deg"]),
                     roll_deg=base.roll_deg + rng.uniform(-jitter["roll_deg"], jitter["roll_deg"]),
-                    clearance_m=(base.clearance_m * rng.uniform(*jitter["clearance_scale"]) if base.clearance_m > 0 else base.clearance_m * rng.uniform(0.5, 2.0)) * scale,
+                    clearance_m=(min(cclear, float(ccap)) if ccap is not None else cclear) * scale,
                     yaw_deg=float((pose.yaw_deg + rng.normal(0.0, 20.0)) % 360.0), splash=None)
     clip_t = sample_clip_time(rng, ccat)
     cshot = {"body_scale": round(scale, 4), "deform": None, "pose": {"clip_t": clip_t} if clip_t is not None else {}, "individual": calf,
@@ -254,10 +296,12 @@ def make_shot(index: int, rng: np.random.Generator, config: dict, vertices_cm: n
               fin_regions: dict | None = None, model: WhaleModel | None = None) -> dict:
     category, pose = sample_pose(rng, config)
     clip_t = sample_clip_time(rng, category) if (model is not None and model.kind == "humpback4k") else None
-    if clip_t is not None and pose.pitch_deg < 0 and category not in poses.BACK_HEIGHT_CATEGORIES:
+    if clip_t is not None and pose.pitch_deg < 0 and category not in poses.BACK_HEIGHT_CATEGORIES and category not in HEAD_UNDER_CATEGORIES:
         # tail-up categories: the keyframe already lifts the fluke; take most of that out of the nose-down pitch
         lift = model.fluke_lift_deg(clip_t)
         pose = replace(pose, pitch_deg=min(0.0, pose.pitch_deg + 0.5 * max(lift, 0.0)))
+    if category in HEAD_UNDER_CATEGORIES:
+        pose = replace(pose, pitch_deg=min(pose.pitch_deg, -15.0))
     # The sea is chosen first so that a pose meant to show above the water clears the waves: the
     # clearance is lifted by a fraction of the crest height (config body.wave_clearance_fraction).
     sea = weighted_choice(rng, config["sea_state_weights"])
@@ -273,18 +317,26 @@ def make_shot(index: int, rng: np.random.Generator, config: dict, vertices_cm: n
     # Body size: humpback length varies from calf to large adult; the canonical labels stay on the unit mesh.
     scale = float(rng.uniform(*body["length_scale"])) if body.get("length_scale") else 1.0
     procedural_bend = False
-    pec_droop = None
+    pec_droop = None; fluke_curl = None
     if model is not None and model.kind == "humpback4k":
         pec_droop = round(float(rng.uniform(*PEC_DROOP_DEG.get(category, (10.0, 40.0)))), 2)
-    if model is not None and model.kind == "humpback4k" and category == "back_arch":
-        # the breath-then-arch series: how far the back humps (arch < 0 = back up on this model), how the tail stock
-        # curls down behind it and the head pitches down; the clearance jitter sets how much back shows
-        # the hump runs from a mild roll-through (-30) to the full arch of the middle of the motion (-80: head and
-        # tail stock under, only back and dorsal fin out); tail stock and head curl down with it
-        # apex at the dorsal fin (body fraction ~0.39 on this model), a little ahead of it early in the roll
-        params = deform.DeformParams(arch_deg=float(rng.uniform(-80.0, -30.0)), tail_curl_deg=float(rng.uniform(-30.0, -5.0)),
-                                     head_pitch_deg=float(rng.uniform(-20.0, -5.0)), lateral_deg=float(rng.uniform(-6.0, 6.0)),
-                                     arch_centre=float(rng.uniform(0.36, 0.48)), arch_span=float(rng.uniform(0.45, 0.6)))
+        # fluke blade angle through the dive: early in the dive (clip_t <= 1.2) the tips hang down as the whale
+        # doubles over, later they point up; fluke_edge always shows the tips pointing up
+        if category == "fluke_up":
+            lo, hi = (-70.0, -10.0) if (clip_t is not None and clip_t <= 1.25) else (-15.0, 20.0)
+        elif category == "fluke_edge":
+            lo, hi = (0.0, 25.0)
+        elif category == "fluke_down":
+            lo, hi = (-95.0, -60.0)           # the blade hangs from the raised tail stock
+        else:
+            lo, hi = (-6.0, 6.0)
+        fluke_curl = round(float(rng.uniform(lo, hi)), 2)
+    procedural = PROCEDURAL_POSES | {k: {kk: tuple(vv) for kk, vv in v.items()} for k, v in config.get("procedural_poses", {}).items()}
+    if model is not None and model.kind == "humpback4k" and category in procedural:
+        # straight keyframe + hump: how far the back humps, how the tail stock curls down behind it and the head pitches
+        # down; the clearance jitter (measured on the back only, poses.BACK_HEIGHT_CATEGORIES) sets how much back shows
+        spec = procedural[category]
+        params = deform.DeformParams(**{key: float(rng.uniform(*spec[key])) for key in spec})
         procedural_bend = True
     if model is not None:
         geometry = None   # computed below, once the individual is known
@@ -306,7 +358,7 @@ def make_shot(index: int, rng: np.random.Generator, config: dict, vertices_cm: n
     wetness = float(rng.uniform(*wet_cfg.get("drying", [0.15, 0.5]))) if rng.uniform() < wet_cfg.get("drying_fraction", 0.15) else float(rng.uniform(*wet_cfg.get("wet", [0.55, 1.0])))
     roughness_scale = round(0.85 - 0.6 * wetness, 3)
     if model is not None:
-        geometry = model.posed({"body_scale": scale, "deform": deform.params_to_dict(params), "pec_droop_deg": pec_droop,
+        geometry = model.posed({"body_scale": scale, "deform": deform.params_to_dict(params), "pec_droop_deg": pec_droop, "fluke_curl_deg": fluke_curl,
                                 "pose": {"clip_t": clip_t} | ({"bend": "procedural"} if procedural_bend else {}), "individual": individual})
     spray_cfg = config["splash"]
     if pose.splash and rng.uniform() > spray_cfg["probability"].get(category, 1.0):
@@ -317,8 +369,17 @@ def make_shot(index: int, rng: np.random.Generator, config: dict, vertices_cm: n
                        splash_amount=pose.splash_amount * float(rng.uniform(*spray_cfg["amount_jitter"])))
     elif pose.clearance_m > 0 and rng.uniform() < spray_cfg["extra_wash_fraction"]:
         pose = replace(pose, splash="wash", splash_scale=float(rng.uniform(0.3, 0.8)), splash_amount=float(rng.uniform(0.3, 0.8)))
-    top_mask = (geometry[:, 0] > poses.BACK_X_MIN_CM) if category in poses.BACK_HEIGHT_CATEGORIES else None
+    top_mask = ((geometry[:, 0] > poses.BACK_X_MIN_CM) & (geometry[:, 0] < poses.BACK_X_MAX_CM)) if category in poses.BACK_HEIGHT_CATEGORIES else None
     placed = poses.place(geometry, pose, top_mask=top_mask)
+    if category in HEAD_UNDER_CATEGORIES:
+        # the head and front body stay under water in a fluking dive: pitch the nose down until they are
+        head = geometry[:, 0] > 150.0
+        for _ in range(8):
+            world_h = transform_mesh(geometry, placed["whale"])[head]
+            if (world_h[:, 2] > 0.0).mean() < 0.01:
+                break
+            pose = replace(pose, pitch_deg=pose.pitch_deg - 6.0)
+            placed = poses.place(geometry, pose, top_mask=top_mask)
     world = transform_mesh(geometry, placed["whale"])
     companion = sample_companion(rng, config, model, category, pose, placed, geometry)
     frame_world = np.concatenate([world, companion.pop("_world")]) if companion else world
@@ -351,6 +412,7 @@ def make_shot(index: int, rng: np.random.Generator, config: dict, vertices_cm: n
         "whale_kind": model.kind if model is not None else "k9239",
         "individual": individual,
         "pec_droop_deg": pec_droop,
+        "fluke_curl_deg": fluke_curl,
         "companion": companion,
         "deform": deform.params_to_dict(params),
         "body_scale": round(scale, 4),
@@ -366,17 +428,54 @@ def make_shot(index: int, rng: np.random.Generator, config: dict, vertices_cm: n
         "exposure_ev": exposure,
         # Wave phase. The render freezes the water at this time (r.Water.OverrideWavesTime, keyed per
         # shot by wf_build_batch), so the editor can put the whale and the splash on the actual surface.
-        "wave_time_s": round(float(rng.uniform(0.0, 600.0)), 3),
+        "wave_time_s": None,                      # chosen below, with the waves in hand
         "stats": placed["stats"],
         "ocean": {"vectors": dict(config["looks"][look]["vectors"])},
     }
-    seastate.apply_to_shot(shot, sea, seed=index)
+    # The ocean renders ONE wave set per batch (wf_build_batch applies batch["waves"]), and batches group shots
+    # by (sea state, look): the wave seed must therefore be a function of those, never of the shot, or the lift
+    # onto the surface, the white water and the through-water labels are computed on waves the render never
+    # shows (that was the case up to run03 for every shot but the first of each batch). Wave phase still
+    # varies per shot through wave_time_s.
+    seastate.apply_to_shot(shot, sea, seed=sum(ord(ch) for ch in look) % 1000)
     # The water surface at the shot's frozen wave time (factory.gerstner = the engine's own waves): lift the
     # whale (with its camera, so the framing holds) by the height under its above-water centroid and the splash
     # by the height at its centre; then the white water along the contact line on that surface.
-    waves = gerstner.generate_waves(shot["waves"]); t = shot["wave_time_s"]
+    waves = gerstner.generate_waves(shot["waves"])
+    # Wave phase. The render freezes the ocean at WAVE_TIME_S for every shot (r.Water.OverrideWavesTime in
+    # DefaultEngine.ini: a per-shot cvar track never reached the water, it ran on the sequence clock), so the
+    # phase varies by translating the whole scene (whale, camera, calf, splash, white water) across the
+    # frozen wave field instead. A 16 m body placed rigidly on 10-30 m waves: of several candidate offsets
+    # keep the one where the surface along the body is most even (a real whale rides the swell; a crest
+    # cutting through a surfacing back is what a random phase produced), preferring the whale high on it.
+    t = WAVE_TIME_S
+    aim0 = np.asarray(placed["stats"]["aim_point"], float)
+    n_candidates = {"rough": 6, "moderate": 4, "light": 2}.get(sea, 1)
+    yaw_r = math.radians(pose.yaw_deg); fwd = np.array([math.cos(yaw_r), math.sin(yaw_r)])
+    along = np.linspace(-0.4, 0.4, 9) * float(geometry[:, 0].max() - geometry[:, 0].min())
+    best, best_score = None, None
+    for _ in range(n_candidates):
+        off = rng.uniform(-SCENE_OFFSET_CM, SCENE_OFFSET_CM, 2)
+        probe = aim0[None, :2] + off[None, :] + along[:, None] * fwd[None, :]
+        hs = gerstner.surface_height(waves, probe[:, 0], probe[:, 1], t)
+        score = float(hs.max() - hs.min()) - 0.5 * float(gerstner.surface_height(waves, aim0[0] + off[0], aim0[1] + off[1], t))
+        if best_score is None or score < best_score:
+            best, best_score = off, score
+    ox, oy = (round(float(best[0]), 2), round(float(best[1]), 2))
+    for loc in (shot["whale"]["location"], camera["location"]) + ((companion["whale"]["location"],) if companion else ()) + ((splash_spec["centre_cm"],) if splash_spec else ()):
+        loc[0] = round(loc[0] + ox, 2); loc[1] = round(loc[1] + oy, 2)
+    placed["stats"]["aim_point"] = [round(aim0[0] + ox, 2), round(aim0[1] + oy, 2), round(float(aim0[2]), 2)]
     aim = placed["stats"]["aim_point"]
+    world = transform_mesh(geometry, shot["whale"])
+    shot["scene_offset_cm"] = [ox, oy]
+    shot["wave_time_s"] = t
     dz = float(gerstner.surface_height(waves, aim[0], aim[1], t))
+    # low cameras in rough water see little but the nearest crest: keep the boat camera up
+    floor_cm = 100.0 * {"rough": 2.0, "moderate": 1.5}.get(sea, 0.0)
+    if camera["location"][2] < floor_cm:
+        camera["location"][2] = round(floor_cm, 2)
+        if not no_whale:                           # the no-whale shots keep their deliberately turned-away yaw
+            camera["rotation"] = poses.look_at_rotation(np.asarray(camera["location"], float), np.asarray(aim, float))
     shot["whale"]["location"][2] = round(shot["whale"]["location"][2] + dz, 2)
     camera["location"][2] = round(camera["location"][2] + dz, 2)
     shot["water_surface_z_cm"] = {"whale": round(dz, 2)}

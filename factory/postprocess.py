@@ -52,7 +52,8 @@ from PIL import Image
 from factory import deform, project, qa
 
 VISIBLE_OUTSIDE_AMODAL_LIMIT = 0.05
-PROJECTION_COVERED_LIMIT = 0.85       # projection above the water row covered by the rendered mask (render vs label scale)
+PROJECTION_COVERED_LIMIT = 0.5        # the projection's clearly above-water part must be this covered by the rendered mask
+PROJECTION_MIN_HEIGHT_CM = 25.0       # "clearly above water": the whale surface this far above the local (frozen Gerstner) surface
 CANON_OFFSET = 32768          # canon npz value = round(mm) + CANON_OFFSET
 
 
@@ -86,6 +87,49 @@ def frame_files(raw_dir: Path, pass_name: str, frame: int) -> Path:
 
 
 MASK_PALETTE = [0, 0, 0, 255, 255, 255, 128, 128, 128]
+CONTOUR_PALETTE = [0, 0, 0, 0, 255, 0, 255, 128, 0, 255, 0, 255]     # none, true silhouette, waterline / foam, calf edge
+CONTOUR_TOLERANCE_PX = 4          # the body must continue at least this far past the visible edge to count as hidden by foam
+CONTOUR_WATER_CM = 45.0           # a visible edge whose whale surface is this close to the local water (and whose body continues
+                                  # past it) is the seam into the water: foam and the nearest crest hide the lowest band of skin
+
+
+def contour_classes(visible: np.ndarray, amodal: np.ndarray, companion: np.ndarray | None, height_above_water_cm: np.ndarray) -> np.ndarray:
+    """Classes of the visible mask's boundary pixels (see process_shot). 1 = the whale's own outline (the edge
+    coincides with the whole-whale projection's outline: open air against sky or water). 2 = any other edge:
+    the seam into the water, the edge of foam or spray lying over the body. 3 = edge against the calf."""
+    from scipy import ndimage
+    # border_value=1: a whale cut by the frame has no contour along the frame edge (it is neither silhouette nor seam)
+    inner = visible & ~ndimage.binary_erosion(visible, iterations=1, border_value=1)
+    outside = ~visible
+    # The render's own answer is the ground truth of what water (surface, crests in front of the whale, foam)
+    # hides: the whole-whale projection minus the visible mask. A visible edge is the whale's own outline only
+    # where it coincides (within CONTOUR_TOLERANCE_PX, the pixel or two by which the render and the factory
+    # projection differ) with the outline of the whole-whale projection; every other edge, whether the straight
+    # seam into the water or the ragged edge of foam lying over the body, is a seam and not to be trusted.
+    amodal_outline = amodal & ~ndimage.binary_erosion(amodal, iterations=1, border_value=1)
+    near_outline = ndimage.binary_dilation(amodal_outline, iterations=CONTOUR_TOLERANCE_PX)
+    calf = ndimage.binary_dilation(outside & companion, iterations=2) & inner if companion is not None and companion.any() else np.zeros_like(inner)
+    out = np.zeros(visible.shape, np.uint8)
+    out[inner] = 2
+    out[inner & near_outline] = 1
+    out[calf] = 3
+    return out
+
+
+def height_above_local_water(deformed_xyz: np.ndarray, whale: dict, waves, wave_time_s: float) -> np.ndarray:
+    """Per pixel: the whale surface's height above the Gerstner water surface at its own world position (cm),
+    nan where there is no whale. The water is the same frozen surface the render used."""
+    from factory import gerstner
+    H, W, _ = deformed_xyz.shape
+    defined = ~np.isnan(deformed_xyz[..., 0])
+    out = np.full((H, W), np.nan, np.float32)
+    if not defined.any():
+        return out
+    pts = deformed_xyz[defined].reshape(-1, 3).astype(np.float64)
+    world = project.transform_mesh(pts, whale)
+    water = gerstner.surface_height(waves, world[:, 0], world[:, 1], wave_time_s)
+    out[defined] = (world[:, 2] - water).astype(np.float32)
+    return out
 WATER_Z_CM = 0.0            # shots are placed against the mean water plane at z = 0 (factory.poses.place)
 THROUGH_WATER_DEPTH_M = 1.5  # default for runs whose config has no "labels" section (run01)
 PART_PALETTE = [0, 0, 0, 60, 120, 255, 40, 200, 200, 255, 220, 40, 255, 120, 40, 230, 60, 200]
@@ -140,7 +184,11 @@ def process_shot(shot: dict, raw_dir: Path, frame: int, out: Path, vertices: np.
     amodal, zbuf, body, surface_z, canon, canon_deformed = project.amodal_and_parts(
         geometry, faces, shot["whale"], camera, extra=True, canonical_cm=vertices, world_z=True, canonical_xyz=True, deformed_xyz=True)
     check = project.check_against_mask(amodal, mask)
-    shallow = through_water(amodal, mask, surface_z, through_water_depth_m)
+    # through-water (class 2): whale just under the actual (frozen Gerstner) surface, not the mean plane
+    from factory import gerstner as _gerstner
+    height_above = height_above_local_water(canon_deformed, shot["whale"], _gerstner.generate_waves(shot["waves"]), float(shot.get("wave_time_s") or 0.0)) \
+        if shot.get("waves") else surface_z - WATER_Z_CM
+    shallow = through_water(amodal, mask, height_above + WATER_Z_CM, through_water_depth_m)
     if companion_mask.any():                       # the calf occludes the mother's labels where it is in front
         amodal = np.where(companion_mask, 0, amodal); shallow &= ~companion_mask
     label = mask.astype(np.uint8)
@@ -162,6 +210,13 @@ def process_shot(shot: dict, raw_dir: Path, frame: int, out: Path, vertices: np.
     else:
         shutil.copyfile(rgb_path, out / "images" / f"{shot_id}.png")
     save_palette_png(label, out / "masks" / f"{shot_id}.png", MASK_PALETTE)
+    # Contour classes along the visible mask's boundary: 1 = true silhouette (the whale ends there against sky or
+    # water background: the amodal projection ends too), 2 = waterline / foam edge (the body continues under
+    # the surface or behind white water: unreliable in real photos), 3 = edge against the calf. The top contour
+    # of a surfacing whale is class 1; a fit should match it and ignore class 2.
+    contours = contour_classes(mask, amodal > 0, companion_mask, height_above)
+    (out / "contours").mkdir(exist_ok=True)
+    save_palette_png(contours, out / "contours" / f"{shot_id}.png", CONTOUR_PALETTE)
     if companion_mask.any() or shot.get("companion"):
         instances = mask.astype(np.uint8); instances[companion_mask] = 2
         (out / "instances").mkdir(exist_ok=True)
@@ -186,13 +241,21 @@ def process_shot(shot: dict, raw_dir: Path, frame: int, out: Path, vertices: np.
     stats = mask_stats(mask)
     stats["through_water_pixels"] = int(shallow.sum())
     stats["companion_pixels"] = int(companion_mask.sum())
+    n_contour = int((contours > 0).sum())
+    stats["contour_pixels"] = n_contour
+    stats["contour_true_fraction"] = round(float((contours == 1).sum() / max(n_contour, 1)), 4)
     flags = []
     if 1.0 - check["visible_inside_amodal"] > VISIBLE_OUTSIDE_AMODAL_LIMIT and mask.any():
         flags.append("visible_outside_amodal")
-    # The converse check: the projection well above the water row must be covered by the rendered mask,
-    # otherwise the render is smaller than the labels (e.g. a focal length the camera clamped).
-    if water_row is not None and mask.any():
-        proj_above = (amodal > 0) & (np.arange(amodal.shape[0])[:, None] <= water_row - 8)
+    # The converse check: the part of the projection that is clearly above the water (the whale surface more than
+    # PROJECTION_MIN_HEIGHT_CM above the local frozen surface, per pixel) must be covered by the rendered mask, otherwise
+    # the render is smaller than the labels (e.g. a focal length the camera clamped). A 3D criterion: with an elevated
+    # camera or an arched / pitched whale the submerged far body projects above the waterline row, so the image row is
+    # no test of being above water. What stays uncovered legitimately is the body behind wave crests or foam, hence the
+    # low limit: the flag marks a render / label mismatch, not partial occlusion.
+    projection_covered = None
+    if mask.any():
+        proj_above = (amodal > 0) & (np.nan_to_num(height_above, nan=-1e9) > PROJECTION_MIN_HEIGHT_CM)
         projection_covered = float((mask & proj_above).sum() / max(proj_above.sum(), 1)) if proj_above.sum() > 500 else None
         if projection_covered is not None and projection_covered < PROJECTION_COVERED_LIMIT:
             flags.append("projection_not_covered")
@@ -212,6 +275,10 @@ def process_shot(shot: dict, raw_dir: Path, frame: int, out: Path, vertices: np.
         "pixels_per_metre_at_whale": round(camera.fx / max(whale_depth["translation_cm"][0] / 100.0, 1e-3), 3),
         "whale_length_m": round(float(base[:, 0].max() - base[:, 0].min()) / 100.0, 3),
         "body_scale": scale,
+        # the bend of the body as the picture shows it (whale frame), and the individual's proportions:
+        # labels for a shape + pose head that scales and bends the mesh to the photo
+        "spine": project.spine_curve(geometry, vertices),
+        "individual_spec": _individual_spec(shot.get("individual")),
         "keypoints": keypoints,
         "keypoint_states": dict(Counter(k.get("state", "unknown") for k in keypoints.values())),
         "water_row_px": water_row,
@@ -223,7 +290,7 @@ def process_shot(shot: dict, raw_dir: Path, frame: int, out: Path, vertices: np.
         "projection_covered_by_mask": None if projection_covered is None else round(projection_covered, 4),
         "parts": parts,
         "qa_flags": flags,
-        "paths": {"image": f"images/{shot_id}.png", "mask": f"masks/{shot_id}.png", "amodal": f"amodal/{shot_id}.png",
+        "paths": {"image": f"images/{shot_id}.png", "mask": f"masks/{shot_id}.png", "amodal": f"amodal/{shot_id}.png", "contours": f"contours/{shot_id}.png",
                   "bodycoords": f"bodycoords/{shot_id}.png", "depth": f"depth/{shot_id}.png", "canon": f"canon/{shot_id}.npz",
                   "canon_deformed": f"canon_deformed/{shot_id}.npz"},
     })
@@ -270,6 +337,28 @@ def _canon_batch_worker(args) -> int:
 _WORKER: dict = {}
 CAMERA_FX: dict | None = None     # run config "camera_fx": noise / chromatic aberration / vignette / JPEG on the RGB (factory.camera_fx)
 MODEL = None                      # factory.whalemodel.WhaleModel of the run (None / k9239: the static mesh path below)
+
+
+_INDIVIDUALS: dict | None = None
+
+
+def _individual_spec(ind) -> dict | None:
+    """Proportions / fluke shape / colouring class of the shot's individual (factory.individuals), or None."""
+    global _INDIVIDUALS
+    if not ind:
+        return None
+    if _INDIVIDUALS is None:
+        try:
+            from factory import individuals as indiv
+            _INDIVIDUALS = {k: v.to_dict() for k, v in indiv.load_library().items()}
+        except Exception:
+            _INDIVIDUALS = {}
+    spec = _INDIVIDUALS.get(ind)
+    if not spec:
+        return None
+    keep = ("calf", "head_len", "girth", "peduncle", "fluke_span", "fluke_sweep_cm", "fluke_notch_cm", "fluke_edge_cm", "pec_len",
+            "dorsal_height", "dorsal_sweep_cm", "fluke_class")
+    return {k: spec[k] for k in keep if k in spec}
 
 
 def _load_model(run_config: dict):

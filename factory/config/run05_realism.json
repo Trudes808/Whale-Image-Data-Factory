@@ -1,0 +1,500 @@
+{
+ "description": "run04_realism: run03 framing/poses/labels plus white water along the body-water contact (foam carpet + aerated cloud on the real wave surface), real sky HDRIs with a matching sun, depth of field.",
+ "resolution": [
+  1280,
+  720
+ ],
+ "frames_per_shot": 3,
+ "batch_size": 50,
+ "pose_weights": {
+  "surface": 30,
+  "back_arch": 18,
+  "blow": 6,
+  "logging": 6,
+  "awash": 4,
+  "blow_sliver": 4,
+  "fluke_up": 11,
+  "fluke_edge": 9,
+  "fluke_down": 8,
+  "breach": 2,
+  "pec_up": 2,
+  "spyhop": 1,
+  "submerged": 2,
+  "roll_belly": 1
+ },
+ "pose_jitter": {
+  "pitch_deg": 15,
+  "roll_deg": 25,
+  "breach_roll_deg": 60,
+  "clearance_scale": [
+   0.5,
+   1.6
+  ],
+  "clearance_max_m": {
+   "logging": 0.8,
+   "blow": 0.9,
+   "back_arch": 1.4,
+   "surface": 1.0,
+   "blow_sliver": 0.45,
+   "awash": 0.3,
+   "fluke_down": 1.8
+  },
+  "pitch_deg_by_category": {
+   "surface": 4,
+   "logging": 5,
+   "blow": 6,
+   "blow_sliver": 5,
+   "awash": 5
+  },
+  "roll_deg_by_category": {
+   "surface": 8,
+   "logging": 10,
+   "blow": 12,
+   "blow_sliver": 10,
+   "awash": 10
+  }
+ },
+ "no_whale_in_frame_fraction": 0.03,
+ "camera": {
+  "distance_m": [
+   50,
+   400
+  ],
+  "boat_height_m": [
+   1.5,
+   4.5
+  ],
+  "elevated_fraction": 0.12,
+  "elevated_height_m": [
+   6,
+   40
+  ],
+  "fill_fraction": [
+   0.3,
+   0.85
+  ],
+  "focal_mm": [
+   70,
+   600
+  ],
+  "aim_jitter_frame_fraction": 0.25,
+  "roll_deg": 5,
+  "min_extent_frame_fraction": 0.0,
+  "min_in_frame_fraction": 0.5,
+  "max_camera_tries": 40,
+  "extent_target": [
+   0.08,
+   0.7
+  ],
+  "normal_strength_focal_mm": 250,
+  "aperture_f": [
+   4.0,
+   11.0
+  ],
+  "bearing_sectors": [
+   [
+    135,
+    225,
+    45
+   ],
+   [
+    45,
+    135,
+    20
+   ],
+   [
+    225,
+    315,
+    20
+   ],
+   [
+    -45,
+    45,
+    15
+   ]
+  ]
+ },
+ "sea_state_weights": {
+  "glassy": 8,
+  "calm": 12,
+  "light": 25,
+  "moderate": 30,
+  "rough": 25
+ },
+ "looks": {
+  "deep_blue": {
+   "weight": 35,
+   "vectors": {
+    "Absorption": [
+     5,
+     25,
+     90,
+     8
+    ],
+    "Scattering": [
+     0.5,
+     0.7,
+     1.0,
+     0.06
+    ],
+    "Water Albedo": [
+     0.25,
+     0.45,
+     0.8,
+     0.5
+    ]
+   }
+  },
+  "open_blue": {
+   "weight": 20,
+   "vectors": {
+    "Absorption": [
+     6,
+     40,
+     140,
+     8
+    ],
+    "Scattering": [
+     0.6,
+     0.8,
+     1.0,
+     0.12
+    ],
+    "Water Albedo": [
+     0.35,
+     0.55,
+     0.85,
+     0.5
+    ]
+   }
+  },
+  "coastal_green": {
+   "weight": 20,
+   "vectors": {
+    "Absorption": [
+     8,
+     70,
+     60,
+     8
+    ],
+    "Scattering": [
+     0.6,
+     1.0,
+     0.8,
+     0.3
+    ],
+    "Water Albedo": [
+     0.4,
+     0.7,
+     0.6,
+     0.5
+    ]
+   }
+  },
+  "grey": {
+   "weight": 25,
+   "vectors": {
+    "Absorption": [
+     6,
+     40,
+     140,
+     8
+    ],
+    "Scattering": [
+     0.8,
+     0.9,
+     1.0,
+     0.15
+    ],
+    "Water Albedo": [
+     0.6,
+     0.65,
+     0.7,
+     0.5
+    ]
+   }
+  }
+ },
+ "lighting": {
+  "sun_elevation_deg": [
+   2,
+   80
+  ],
+  "overcast_fraction": 0.35,
+  "clear_intensity": [
+   7,
+   12
+  ],
+  "overcast_intensity": [
+   1.5,
+   4.5
+  ],
+  "fog_density": [
+   0.0005,
+   0.03
+  ],
+  "exposure_ev": [
+   -1.5,
+   1.5
+  ]
+ },
+ "splash": {
+  "probability": {
+   "breach": 0.6,
+   "fluke_up": 0.3,
+   "pec_up": 0.2,
+   "spyhop": 0.2,
+   "arch": 0.15,
+   "blow": 0.15,
+   "logging": 0.0,
+   "awash": 0.0,
+   "blow_sliver": 0.0,
+   "fin_tip": 0.0,
+   "fluke_edge": 0.0,
+   "peduncle": 0.0,
+   "spyhop_low": 0.0,
+   "roll_belly": 0.0,
+   "back_arch": 0.15,
+   "fluke_down": 0.3,
+   "surface": 0.15
+  },
+  "scale_jitter": [
+   0.4,
+   1.0
+  ],
+  "amount_jitter": [
+   0.3,
+   1.0
+  ],
+  "extra_wash_fraction": 0.02
+ },
+ "body": {
+  "deform_fraction": 0.95,
+  "strength": [
+   0.7,
+   1.8
+  ],
+  "skin_weights": {
+   "00": 25,
+   "01": 15,
+   "02": 15,
+   "03": 15,
+   "04": 15,
+   "05": 15
+  },
+  "length_scale": [
+   0.55,
+   1.1
+  ],
+  "wave_clearance_fraction": 0.6,
+  "wetness": {
+   "wet": [
+    0.55,
+    1.0
+   ],
+   "drying": [
+    0.15,
+    0.5
+   ],
+   "drying_fraction": 0.15
+  }
+ },
+ "labels": {
+  "through_water_depth_m": 1.5
+ },
+ "whitewater": {
+  "probability": 0.9,
+  "amount_jitter": [
+   0.4,
+   1.3
+  ],
+  "calm_fraction": 0.15
+ },
+ "skies": {
+  "directory": "third_party_assets/skies",
+  "fraction": 0.0,
+  "intensity_jitter": [
+   0.8,
+   1.25
+  ],
+  "sky_median_target": 1.5
+ },
+ "camera_fx": {
+  "noise_sigma": [
+   0.001,
+   0.006
+  ],
+  "chroma_px": [
+   0.0,
+   0.6
+  ],
+  "vignette": [
+   0.0,
+   0.2
+  ],
+  "jpeg_quality": [
+   88,
+   97
+  ]
+ },
+ "islands": {
+  "fraction": 0.5,
+  "max_count": 3,
+  "distance_m": [
+   2500,
+   18000
+  ],
+  "library": 6
+ },
+ "whale": {
+  "kind": "humpback4k"
+ },
+ "companion": {
+  "fraction": 0.18,
+  "scale": [
+   0.35,
+   0.5
+  ],
+  "lateral_cm": [
+   40,
+   300
+  ],
+  "along_cm": [
+   -500,
+   500
+  ]
+ },
+ "procedural_poses": {
+  "surface": {
+   "arch_deg": [
+    -55,
+    -30
+   ],
+   "tail_curl_deg": [
+    -25,
+    -8
+   ],
+   "head_pitch_deg": [
+    -30,
+    -12
+   ],
+   "lateral_deg": [
+    -6,
+    6
+   ],
+   "arch_centre": [
+    0.36,
+    0.42
+   ],
+   "arch_span": [
+    0.45,
+    0.6
+   ]
+  },
+  "logging": {
+   "arch_deg": [
+    -45,
+    -25
+   ],
+   "tail_curl_deg": [
+    -20,
+    -5
+   ],
+   "head_pitch_deg": [
+    -28,
+    -12
+   ],
+   "lateral_deg": [
+    -5,
+    5
+   ],
+   "arch_centre": [
+    0.36,
+    0.42
+   ],
+   "arch_span": [
+    0.5,
+    0.65
+   ]
+  },
+  "blow": {
+   "arch_deg": [
+    -55,
+    -30
+   ],
+   "tail_curl_deg": [
+    -25,
+    -8
+   ],
+   "head_pitch_deg": [
+    -30,
+    -14
+   ],
+   "lateral_deg": [
+    -6,
+    6
+   ],
+   "arch_centre": [
+    0.38,
+    0.44
+   ],
+   "arch_span": [
+    0.45,
+    0.6
+   ]
+  },
+  "blow_sliver": {
+   "arch_deg": [
+    -55,
+    -30
+   ],
+   "tail_curl_deg": [
+    -25,
+    -8
+   ],
+   "head_pitch_deg": [
+    -30,
+    -12
+   ],
+   "lateral_deg": [
+    -6,
+    6
+   ],
+   "arch_centre": [
+    0.36,
+    0.44
+   ],
+   "arch_span": [
+    0.45,
+    0.6
+   ]
+  },
+  "awash": {
+   "arch_deg": [
+    -55,
+    -30
+   ],
+   "tail_curl_deg": [
+    -25,
+    -8
+   ],
+   "head_pitch_deg": [
+    -30,
+    -12
+   ],
+   "lateral_deg": [
+    -6,
+    6
+   ],
+   "arch_centre": [
+    0.36,
+    0.44
+   ],
+   "arch_span": [
+    0.45,
+    0.6
+   ]
+  }
+ },
+ "_note": "run05: level surfacing pose (surface) replaces most head-out breathing shots; framing capped (extent 0.7, 600 mm, 50 m)"
+}

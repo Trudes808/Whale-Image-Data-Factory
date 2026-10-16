@@ -34,6 +34,8 @@ CATEGORY = {
     "blow_sliver": dict(contact=0.65, wake=0.50, wake_len=10.0, boil=0.0, impact=0.0),
     "arch":        dict(contact=0.70, wake=0.65, wake_len=15.0, boil=0.3, impact=0.0),
     "back_arch":   dict(contact=0.65, wake=0.6, wake_len=14.0, boil=0.25, impact=0.0),
+    "surface":     dict(contact=0.55, wake=0.5, wake_len=12.0, boil=0.2, impact=0.0),
+    "fluke_down":  dict(contact=0.8, wake=0.4, wake_len=8.0, boil=0.5, impact=0.0),     # water streaming off the stock and tips
     "peduncle":    dict(contact=0.70, wake=0.50, wake_len=10.0, boil=0.6, impact=0.0),
     "fluke_up":    dict(contact=0.60, wake=0.30, wake_len=8.0, boil=0.9, impact=0.0),
     "fluke_edge":  dict(contact=0.50, wake=0.25, wake_len=6.0, boil=0.9, impact=0.0),

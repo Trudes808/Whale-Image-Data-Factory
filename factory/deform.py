@@ -47,7 +47,7 @@ class DeformParams:
 def sample_params(rng: np.random.Generator, category: str, strength: float = 1.0) -> DeformParams:
     """Plausible deformation for a pose category (degrees), scaled by strength."""
     u = lambda lo, hi: float(rng.uniform(lo, hi)) * strength  # noqa: E731
-    category = {"fin_tip": "pec_up", "fluke_edge": "fluke_up", "peduncle": "arch", "back_arch": "arch", "spyhop_low": "spyhop", "roll_belly": "breach", "blow_sliver": "blow"}.get(category, category)
+    category = {"fin_tip": "pec_up", "fluke_edge": "fluke_up", "fluke_down": "fluke_up", "peduncle": "arch", "back_arch": "arch", "surface": "arch", "spyhop_low": "spyhop", "roll_belly": "breach", "blow_sliver": "blow"}.get(category, category)
     if category == "fluke_up":
         p = DeformParams(arch_deg=u(0, 10), tail_curl_deg=u(-25, 25), lateral_deg=u(-15, 15), fluke_twist_deg=u(-15, 15))
     elif category == "arch":

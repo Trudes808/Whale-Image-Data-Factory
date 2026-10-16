@@ -227,7 +227,7 @@ def main() -> None:
         wave_time = float(shot.get("wave_time_s", 0.0))
         cvar = cvars.add_section()
         cvar.set_range(start, start + per_shot)
-        cvar.set_from_string(f"r.Water.OverrideWavesTime={wave_time:.3f}")
+        cvar.set_from_string(f"r.Water.OverrideWavesTime={wave_time:.3f}")   # the same frozen time as DefaultEngine.ini (the track alone never reached the water)
         surface = ride_waves(shot, waves, wave_time)
         variant = wf_shot.spawn_whale_variant(shot, shot["id"], hidden=True)
         whale_visibility = add_visibility_track(sequence.add_possessable(variant), total)

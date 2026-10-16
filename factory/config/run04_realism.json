@@ -8,21 +8,18 @@
   "batch_size": 50,
   "pose_weights": {
     "logging": 12,
-    "blow": 14,
-    "arch": 6,
-    "fluke_up": 10,
-    "breach": 5,
-    "pec_up": 6,
+    "blow": 18,
+    "fluke_up": 14,
+    "breach": 3,
+    "pec_up": 4,
     "spyhop": 3,
     "awash": 8,
     "submerged": 3,
     "blow_sliver": 8,
-    "fin_tip": 5,
-    "fluke_edge": 7,
-    "peduncle": 6,
-    "spyhop_low": 3,
+    "fluke_edge": 11,
     "roll_belly": 2,
-    "back_arch": 16
+    "back_arch": 22,
+    "fluke_down": 10
   },
   "pose_jitter": {
     "pitch_deg": 15,
@@ -31,13 +28,19 @@
     "clearance_scale": [
       0.5,
       1.6
-    ]
+    ],
+    "clearance_max_m": {
+      "logging": 1.2,
+      "blow": 1.2,
+      "back_arch": 1.4,
+      "fluke_down": 1.8
+    }
   },
   "no_whale_in_frame_fraction": 0.03,
   "camera": {
     "distance_m": [
       40,
-      180
+      400
     ],
     "boat_height_m": [
       1.5,
@@ -62,13 +65,35 @@
     "min_in_frame_fraction": 0.5,
     "max_camera_tries": 40,
     "extent_target": [
-      0.3,
+      0.08,
       1.6
     ],
     "normal_strength_focal_mm": 250,
     "aperture_f": [
       4.0,
       11.0
+    ],
+    "bearing_sectors": [
+      [
+        135,
+        225,
+        45
+      ],
+      [
+        45,
+        135,
+        20
+      ],
+      [
+        225,
+        315,
+        20
+      ],
+      [
+        -45,
+        45,
+        15
+      ]
     ]
   },
   "sea_state_weights": {
@@ -211,7 +236,8 @@
       "peduncle": 0.0,
       "spyhop_low": 0.0,
       "roll_belly": 0.0,
-      "back_arch": 0.15
+      "back_arch": 0.15,
+      "fluke_down": 0.3
     },
     "scale_jitter": [
       0.4,

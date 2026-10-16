@@ -19,6 +19,9 @@ RUN_DIR="${WF_RUN04_DIR:-data/renders/run04}"
 COUNT="${WF_RUN04_COUNT:-10000}"
 SEED="${WF_RUN04_SEED:-5}"
 CONFIG="${WF_RUN04_CONFIG:-factory/config/run04_realism.json}"
+# 2x supersampling by default: run04 frames whales down to 8 % of the frame (field distances to 400 m), where
+# thin flukes and the waterline alias at one sample per pixel. MRQ_Batch_AA4 is the slower, cleaner option.
+export WF_RENDER_CONFIG="${WF_RENDER_CONFIG:-MRQ_Batch_AA2}"
 DINO="${WF_DINO_REPO:-$WF_REPO_ROOT/../Dinov3-WhaleID}"
 STAGES="$RUN_DIR/pipeline"
 mkdir -p "$STAGES"

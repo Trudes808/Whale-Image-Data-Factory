@@ -93,12 +93,21 @@ POSES: dict[str, Pose] = {
     # run04: the commonest field shot. The whale breathes, then arches: blowhole, back and dorsal fin clearly out
     # of the water as it slides through and resubmerges. The body shape comes from the start of the rig's clip;
     # the clearance is measured on the back (flukes excluded), so how much back shows varies while the flukes stay under.
+    # run04: the start of a fluking dive seen so often in the field: tail stock arched high out of the water, the
+    # fluke blade still hanging down with its tips at the water (real photo 184A2635). Clip frames with the tail
+    # lifted plus a strong downward fluke curl (shotlist); the clearance is the height of the tail stock.
+    "fluke_down": Pose(-30.0, 0.0, 1.6, "tail stock arched high, fluke raised but blade still hanging down, tips at the water",
+                       Camera(140.0, 60.0, 3.0, 70.0), splash="wash", splash_scale=0.5, splash_amount=0.6),
+    "surface": Pose(0.0, 0.0, 0.6, "level surfacing: the back from the peduncle to the blowhole out, head low in the water",
+                    Camera(100.0, 60.0, 3.0, 50.0), splash="wash", splash_scale=0.4, splash_amount=0.4),
     "back_arch": Pose(-5.0, 0.0, 1.1, "breath then arch: blowhole to dorsal fin and back out of the water, sliding through",
                       Camera(100.0, 60.0, 3.0, 50.0), splash="wash", splash_scale=0.5, splash_amount=0.5),
 }
-# categories whose clearance is measured on the back only (body-frame x > BACK_X_MIN_CM: no flukes / tail stock)
-BACK_HEIGHT_CATEGORIES = {"back_arch"}
+# categories whose clearance is measured on the back only (body-frame BACK_X_MIN_CM < x < BACK_X_MAX_CM: no flukes /
+# tail stock, and no head: a nose-up body would otherwise be placed by its rostrum and show the head, not the back)
+BACK_HEIGHT_CATEGORIES = {"back_arch", "surface", "logging", "blow", "blow_sliver", "awash"}
 BACK_X_MIN_CM = -350.0
+BACK_X_MAX_CM = 450.0
 
 
 def load_obj_vertices(path: str | Path) -> np.ndarray:

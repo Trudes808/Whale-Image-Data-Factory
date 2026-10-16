@@ -17,6 +17,7 @@ script="$WF_PROJECT_DIR/Content/Python/wf_$name.py"
 [ -f "$script" ] || { echo "no such script: $script" >&2; exit 1; }
 log="$WF_PROJECT_DIR/Saved/Logs/wf_$name.log"
 mkdir -p "$(dirname "$log")"
+rm -f -- "$log"            # never judge this run by a previous run's log (an editor that dies before opening its log)
 
 wf_python -m factory.diskguard check --path "$HOME"
 echo "Running $script headless (log: $log) ..."
@@ -25,6 +26,10 @@ WF_QUIT_WHEN_DONE=1 wf_guarded timeout --signal=TERM "${WF_SCRIPT_TIMEOUT_S:-360
     -RenderOffscreen -unattended -nosplash -nosound -abslog="$log" \
     -ExecCmds="py $script" "$@" >/dev/null 2>&1 || true
 
+if [ ! -f "$log" ]; then
+    echo "wf_$name: FAILED (the editor wrote no log: it died before starting)" >&2
+    exit 1
+fi
 grep -E "\[wf_$name\]|LogPython: Error|Traceback|Error: " "$log" | sed -E 's/^\[[^]]*\]\[[^]]*\]//' || true
 if grep -q "\[wf_$name\] OK" "$log"; then
     echo "wf_$name: OK"

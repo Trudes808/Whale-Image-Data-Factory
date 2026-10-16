@@ -109,7 +109,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             image, recipe = make_variant(base, args.seed * 1000 + k)
         path = args.out_dir / f"T_Humpback_BaseColor_{k:02d}.png"
-        Image.fromarray(image).save(path)
+        tmp = path.with_suffix(".tmp.png"); Image.fromarray(image).save(tmp); tmp.replace(path)   # atomic for concurrent imports
         recipes[f"{k:02d}"] = recipe
         print(path, recipe)
     (args.out_dir / "skins.json").write_text(json.dumps(recipes, indent=1))

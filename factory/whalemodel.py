@@ -40,10 +40,12 @@ STRAIGHT = [0.0, 0.3, 11.0, 12.0, 12.6, 17.0]
 BACK = [0.6, 0.8, 13.8, 14.2, 24.5, 25.5]
 DIVE = [1.2, 1.4, 1.6, 1.9]
 KEYFRAMES = {
-    "logging": STRAIGHT, "blow": [0.0, 0.3, 0.6, 12.0, 12.6, 13.4], "blow_sliver": [0.0, 0.3, 12.0, 12.6],
-    "awash": [0.0, 0.3, 12.0, 12.6, 13.4], "submerged": [0.0, 12.0, 13.4],
+    # the surfacing categories share the straight-ish frames of the clip's start; their hump is procedural (shotlist.PROCEDURAL_POSES)
+    "logging": [0.2, 0.3, 0.35, 0.45], "blow": [0.2, 0.3, 0.35, 0.45], "blow_sliver": [0.2, 0.3, 0.35, 0.45],
+    "awash": [0.2, 0.3, 0.35, 0.45], "submerged": [0.0, 12.0, 13.4],
     "arch": [0.3, 0.6], "peduncle": [0.8, 1.0, 13.8, 25.5],
-    "back_arch": [0.2, 0.3, 0.35, 0.45],     # straight-ish frames from the start of the clip; the hump is procedural (shotlist) "fluke_up": DIVE, "fluke_edge": [1.6, 1.9, 2.2],
+    "back_arch": [0.2, 0.3, 0.35, 0.45], "surface": [0.2, 0.3, 0.35, 0.45],     # straight-ish frames from the start of the clip; the hump is procedural (shotlist)
+    "fluke_up": [0.8, 1.0, 1.2, 1.4, 1.6, 1.9, 2.2], "fluke_edge": [1.6, 1.9, 2.2], "fluke_down": [1.0, 1.2, 1.4, 1.6],   # the whole dive; the fluke curl (shotlist) adds the tips-down phase
     "breach": [2.9, 7.4, 16.2, 16.6],          # 15.6 tears the dorsal-fin base seam in the asset's skinning
     "pec_up": [0.0, 0.3, 12.0], "fin_tip": [0.0, 0.3, 12.0], "roll_belly": [0.0, 0.3, 12.0],
     "spyhop": [0.0, 2.9, 16.6], "spyhop_low": [0.0, 2.9, 16.6],
@@ -169,7 +171,7 @@ class WhaleModel:
             rest_world = self.rig.pose(None, mi)
             edited = indiv.apply_rest(rest_world, spec, joints, regions if mi == self.rig.mesh_index else {})
             positions[mi] = self.rig.bind_from_rest(edited, mi)
-        entry = {"positions": positions, "offsets": indiv.joint_offsets_model(spec), "spec": spec}
+        entry = {"positions": positions, "spec": spec}
         if len(cache) > 32:
             cache.clear()
         cache[spec.id] = entry
@@ -214,12 +216,63 @@ class WhaleModel:
             out[idx, 2] = root[2] + s_ * y + c * z
         return out
 
-    def clip_pose(self, t: float | None, ind=None, pec_droop_deg: float = 0.0) -> np.ndarray:
+    def _levelling(self, jp: dict) -> np.ndarray:
+        """Rotation (rig frame) that levels the front axis of a frame to the rest axis, as clip_pose applies it."""
+        a = self._front_axis(jp); b = self._front_axis_rest
+        axis = np.cross(a, b); s = np.linalg.norm(axis); c = float(np.dot(a, b))
+        if s > 1e-8:
+            k = axis / s; K = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
+            return np.eye(3) + s * K + (1 - c) * (K @ K)
+        return np.eye(3)
+
+    def body_frame_offsets(self, t: float | None, joint_deg: dict) -> dict:
+        """{joint name: 3x3 model-frame rotation} for joint_deg = {joint: [roll, pitch, yaw] degrees about the
+        whale's own axes (x forward, y right, z up) in the levelled body frame of clip time t}. The clip pitches
+        and turns the whale, so a rotation about a world axis would not be a pitch of the tail; this builds the
+        rotation about the body axes carried into the rig frame of that frame."""
+        if not joint_deg:
+            return {}
+        P = MODEL_TO_PROJECT_ / 100.0                                   # model -> project (orthonormal, det -1)
+        R_lev = self._levelling(self.rig.joint_positions(t))          # rig/project frame, levelled = R_lev @ rig
+        out = {}
+        for name, (roll, pitch, yaw) in joint_deg.items():
+            if abs(roll) + abs(pitch) + abs(yaw) < 1e-9:
+                continue
+            R = np.eye(3)
+            for axis_proj, deg in ((np.array([1.0, 0, 0]), roll), (np.array([0, 1.0, 0]), pitch), (np.array([0, 0, 1.0]), yaw)):
+                if abs(deg) < 1e-9:
+                    continue
+                k = R_lev.T @ axis_proj                                    # the body axis, in the (unlevelled) rig frame
+                k = P.T @ k; k /= np.linalg.norm(k)                       # ... in the model frame
+                K = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]]); a = np.radians(deg)
+                R = (np.eye(3) + np.sin(a) * K + (1 - np.cos(a)) * (K @ K)) @ R
+            out[name] = R
+        return out
+
+    def curl_fluke(self, V: np.ndarray, curl_deg: float) -> np.ndarray:
+        """Swing the fluke blade about a lateral hinge at its base by curl_deg (+ = tips up), vertex level in
+        the levelled body frame with a smooth membership over the last part of the tail stock. The dive clip
+        only ever lifts the blade; the tips-down phase of a whale doubling over needs this on top."""
+        if abs(curl_deg) < 1e-6:
+            return V
+        from factory.individuals import _smooth
+        w = _smooth(-self.canonical[:, 0], 380.0, 620.0)              # 0 on the tail stock, 1 on the blade (a 2.4 m hinge: a -95 curl without creasing)
+        idx = np.where(w > 1e-3)[0]
+        hinge = V[(self.canonical[:, 0] > -530) & (self.canonical[:, 0] < -490)].mean(0)
+        ang = np.radians(curl_deg) * w[idx]; c, s_ = np.cos(ang), np.sin(ang)
+        rel = V[idx] - hinge; x, z = rel[:, 0], rel[:, 2]
+        out = V.copy()
+        out[idx, 0] = hinge[0] + c * x + s_ * z                      # rotation about +y through the hinge
+        out[idx, 2] = hinge[2] - s_ * x + c * z
+        return out
+
+    def clip_pose(self, t: float | None, ind=None, pec_droop_deg: float = 0.0, fluke_curl_deg: float = 0.0) -> np.ndarray:
         """Clip frame t (None = rest) as a whale-frame mesh: root-relative, the front half levelled to the rest
         axis, scaled and centred like the rest pose (body then eyes); ``ind`` = an individual id / spec."""
         entry = self.individual(ind)
         pos = entry["positions"] if entry else {}
-        offs = entry["offsets"] or None if entry else None
+        joint_deg = dict(entry["spec"].joint_deg) if entry else {}
+        offs = self.body_frame_offsets(t, joint_deg) or None
         V = self.rig.pose(t, None, pos.get(self.rig.mesh_index), offs); jp = self.rig.joint_positions(t, offs)
         eyes = []                                      # body only (see __init__)
         ev = np.concatenate([e["vertices"] for e in eyes]) if eyes else np.zeros((0, 3))
@@ -239,6 +292,8 @@ class WhaleModel:
             # would otherwise tilt the hinge), with the fin root joints carried into that frame
             jp_lev = {k: R @ (np.asarray(v) - jp["joint51_00"]) + root_rest for k, v in jp.items()}
             out = self.droop_pectorals(out, jp_lev, pec_droop_deg)
+        if fluke_curl_deg:
+            out = self.curl_fluke(out, fluke_curl_deg)
         return out * self.length_scale - self.centre
 
     def fluke_lift_deg(self, t: float | None) -> float:
@@ -290,8 +345,8 @@ class WhaleModel:
             return deform.deform(base, params, regions)
         t = (shot.get("pose") or {}).get("clip_t")
         ind = shot.get("individual")
-        droop = float(shot.get("pec_droop_deg") or 0.0)
-        base = (self.clip_pose(float(t) if t is not None else None, ind, droop) if (t is not None or ind or droop) else self.rest.copy())
+        droop = float(shot.get("pec_droop_deg") or 0.0); curl = float(shot.get("fluke_curl_deg") or 0.0)
+        base = (self.clip_pose(float(t) if t is not None else None, ind, droop, curl) if (t is not None or ind or droop or curl) else self.rest.copy())
         base = self._stitch(base) * scale
         # the clip bends the body; keep only the fin parameters of the procedural deformation
         if (shot.get("pose") or {}).get("bend") == "procedural":

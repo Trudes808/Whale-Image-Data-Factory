@@ -302,10 +302,6 @@ float fBand = 1.0;
 if (CamPos.z > Ceiling && CamPos.z > P.z)
     fBand = saturate((Ceiling - P.z) / (CamPos.z - P.z));   // fraction of the ray (from P) below Ceiling
 float tStart = RayLength * (1.0 - fBand);
-// Only the water near the whale (NEAR_CM back along the ray) is tested: the analytic surface and the
-// rendered water mesh agree there. Far from the whale the mesh is coarser and the exact surface can
-// show a crest the render never draws, which hid whole whales from low cameras in rough seas.
-tStart = max(tStart, RayLength - NEAR_CM);
 for (int i = Steps; i >= 0; i--)  // whale point first, then back toward the camera
 {
     float3 S = CamPos + Dir * (tStart + (RayLength - tStart) * i / Steps);
@@ -328,7 +324,7 @@ return Who;
 """
 
 
-def make_label_material(path: str = LABEL_MATERIAL, analytic_waves: bool = True) -> unreal.Material:
+def make_label_material(path: str = LABEL_MATERIAL, analytic_waves: bool = True, shader: str | None = None) -> unreal.Material:
     """Post-process material: 1 where the whale is directly visible, else 0.
 
     whale_visible = stencil is whale, nothing opaque in front (CustomDepth <= SceneDepth),
@@ -336,9 +332,14 @@ def make_label_material(path: str = LABEL_MATERIAL, analytic_waves: bool = True)
     surface. With analytic_waves=False the water is expected to be in SceneDepth, which is
     the case when the ocean renders with MI_OceanOpaque (the label render pass).
     """
+    # Build under a temporary name and swap in only once it compiles: a failed rebuild must never leave the
+    # render without its label pass (the MRQ preset references this path).
+    final_path = path
+    folder, final_name = path.rsplit("/", 1)
+    path = f"{folder}/{final_name}_building"
+    name = f"{final_name}_building"
     if unreal.EditorAssetLibrary.does_asset_exist(path):
         unreal.EditorAssetLibrary.delete_asset(path)
-    folder, name = path.rsplit("/", 1)
     material = asset_tools.create_asset(name, folder, unreal.Material, unreal.MaterialFactoryNew())
     material.set_editor_property("material_domain", unreal.MaterialDomain.MD_POST_PROCESS)
     # After the tonemapper (not replacing it): Movie Render Queue's extra post-process passes
@@ -368,14 +369,14 @@ def make_label_material(path: str = LABEL_MATERIAL, analytic_waves: bool = True)
     custom.set_editor_property("description", "WhaleVisible")
     custom.set_editor_property("include_file_paths", ["/Plugin/Water/Private/GerstnerWaveFunctions.ush"])
     defines = []
-    for name, value in (("WHALE_STENCIL", f"{WHALE_STENCIL}.0"), ("COMPANION_STENCIL", f"{wf_shot.COMPANION_STENCIL}.0"), ("BODY_INDEX", str(WATER_BODY_INDEX)), ("NEAR_CM", "2500.0"),
+    for name, value in (("WHALE_STENCIL", f"{WHALE_STENCIL}.0"), ("COMPANION_STENCIL", f"{wf_shot.COMPANION_STENCIL}.0"), ("BODY_INDEX", str(WATER_BODY_INDEX)),
                         ("BASE_Z", f"{WATER_SURFACE_Z:.3f}"), ("ANALYTIC_WAVES", "1" if analytic_waves else "0")):
         define = unreal.CustomDefine()
         define.set_editor_property("define_name", name)
         define.set_editor_property("define_value", value)
         defines.append(define)
     custom.set_editor_property("additional_defines", defines)
-    custom.set_editor_property("code", LABEL_SHADER)
+    custom.set_editor_property("code", shader or LABEL_SHADER)
     inputs = []
     for name in sources:
         item = unreal.CustomInput()
@@ -388,9 +389,15 @@ def make_label_material(path: str = LABEL_MATERIAL, analytic_waves: bool = True)
     mel.connect_material_property(custom, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
     errors = mel.recompile_material(material)
     if errors:
+        unreal.EditorAssetLibrary.delete_asset(path)
         raise RuntimeError(f"label material failed to compile: {errors}")
     unreal.EditorAssetLibrary.save_asset(path, only_if_is_dirty=False)
-    return material
+    if unreal.EditorAssetLibrary.does_asset_exist(final_path):
+        unreal.EditorAssetLibrary.delete_asset(final_path)
+    if not unreal.EditorAssetLibrary.rename_asset(path, final_path):
+        raise RuntimeError(f"could not move {path} to {final_path}")
+    unreal.EditorAssetLibrary.save_asset(final_path, only_if_is_dirty=False)
+    return unreal.EditorAssetLibrary.load_asset(final_path)
 
 
 SPLASH_ALPHA_HLSL = r"""
