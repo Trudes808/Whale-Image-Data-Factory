@@ -207,6 +207,13 @@ def landmarks(vertices_cm: np.ndarray, groups: dict | None = None) -> dict:
         "tail_base_top": pick(centre & band(xm + 0.21 * length, 0.02 * length), z, np.argmax),
         "tail_base_bottom": pick(centre & band(xm + 0.21 * length, 0.02 * length), z, np.argmin),
     }
+    # spine_end: the dorsal midline point at the fluke root, i.e. the narrowest cross-section of the tail stock before
+    # the blades spread (the end of the spine's dorsal ridge). With the notch it gives the fluke's midline axis, and its
+    # visibility tells the fluke's upper side from its underside.
+    xs = np.arange(xm + 0.08 * length, xm + 0.25 * length, 0.005 * length)
+    widths = [np.abs(y[(x >= a) & (x < a + 0.005 * length)]).max() if ((x >= a) & (x < a + 0.005 * length)).any() else np.inf for a in xs]
+    x_root = float(xs[int(np.argmin(widths))] + 0.0025 * length)
+    extra["spine_end"] = pick((np.abs(y) < 8) & band(x_root, 0.01 * length), z, np.argmax)
     if indices.get("dorsal_fin_tip") is not None:
         xt = x[indices["dorsal_fin_tip"]]
         extra["dorsal_fin_front"] = pick(centre & band(xt + 0.06 * length, 0.015 * length), z, np.argmax)
@@ -221,6 +228,10 @@ def landmarks(vertices_cm: np.ndarray, groups: dict | None = None) -> dict:
     except Exception:
         pass
     indices.update({k: i for k, i in extra.items() if i is not None})
+    # run05: edge chains as extra named points, so the fin and fluke trailing edges are labelled per shot like keypoints
+    # (fin_te_00.. tip -> base along the rear of the dorsal fin, fin_le_00.. tip -> base along its front,
+    #  fluke_te_00.. left tip -> notch -> right tip along the hindmost edge)
+    indices.update(edge_chains(v, indices))
     if groups and "eye" in groups:
         eyes = np.asarray(groups["eye"])
         left, right = eyes[v[eyes, 1] < 0], eyes[v[eyes, 1] >= 0]
@@ -229,6 +240,63 @@ def landmarks(vertices_cm: np.ndarray, groups: dict | None = None) -> dict:
         if len(right):
             indices["eye_right"] = [int(i) for i in right]
     return {name: i for name, i in indices.items() if i is not None}
+
+
+def edge_chains(v: np.ndarray, indices: dict, n_fin: int = 12, n_fluke: int = 24) -> dict:
+    """Vertex indices along the dorsal fin's trailing and leading edges (height bins from the fin base to the tip) and
+    along the fluke's trailing edge (span bins from the left tip to the right tip), picked geometrically on the
+    canonical mesh so that they deform with it."""
+    x, y, z = v[:, 0], v[:, 1], v[:, 2]
+    out = {}
+    tip, front, back = indices.get("dorsal_fin_tip"), indices.get("dorsal_fin_front"), indices.get("dorsal_fin_back")
+    if tip is not None and front is not None and back is not None:
+        # The fin's side silhouette: the upper envelope z_max(x) of the vertices near the midline between the back
+        # junction and the front junction, above the base line (back -> front). The trailing edge is the envelope
+        # from the back junction up to the tip, the leading edge from the tip down to the front junction; each is
+        # resampled at n_fin positions along its length (nearest envelope vertex). Vertex indices, so the chains
+        # follow an individual's fin (height, sweep, trailing-edge wear) and the pose.
+        xb, zb = x[back], z[back]; xf, zf = x[front], z[front]; xt = x[tip]
+        base = lambda xx: zb + (xx - xb) * (zf - zb) / max(xf - xb, 1e-6)
+        band = (x >= xb - 2.0) & (x <= xf + 2.0) & (np.abs(y) < 30.0)
+        above = band & (z > base(x) + 2.0)
+        sel = np.nonzero(above)[0]
+        if len(sel) > 20:
+            bins = np.floor((x[sel] - xb) / 2.0).astype(int)                       # 2 cm x bins -> the highest vertex each
+            env = {}
+            for i, b in zip(sel, bins):
+                if b not in env or z[i] > z[env[b]]:
+                    env[b] = int(i)
+            env_idx = np.array([env[b] for b in sorted(env)])                       # back -> front
+            k_tip = int(np.argmin(np.abs(x[env_idx] - xt)))
+
+            def walk(chain):
+                """Follow the envelope away from the tip while it keeps descending: stop at the first saddle (the
+                envelope rises again by > 3 cm: the back's hump in front of the fin) or below the base line."""
+                keep, zmin = [], np.inf
+                for i in chain:
+                    if z[i] > zmin + 3.0 or z[i] < base(x[i]) + 2.0:
+                        break
+                    keep.append(int(i)); zmin = min(zmin, float(z[i]))
+                return np.array(keep, dtype=int)
+            trailing = walk(env_idx[: k_tip + 1][::-1])                             # tip -> back junction
+            leading = walk(env_idx[k_tip:])                                         # tip -> front junction
+            for prefix, chain in (("fin_te", trailing), ("fin_le", leading)):
+                if len(chain) < 3:
+                    continue
+                pts = v[chain][:, [0, 2]]
+                arc = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(pts, axis=0), axis=1))])
+                for k, t in enumerate(np.linspace(0.0, arc[-1], n_fin)):
+                    out[f"{prefix}_{k:02d}"] = int(chain[int(np.argmin(np.abs(arc - t)))])   # 00 = tip, n-1 = junction
+    lt, rt = indices.get("fluke_tip_left"), indices.get("fluke_tip_right")
+    if lt is not None and rt is not None:
+        length = x.max() - x.min(); tail = x < x.min() + 0.15 * length
+        yl, yr = y[lt], y[rt]
+        bins = np.linspace(min(yl, yr), max(yl, yr), n_fluke + 1)
+        for k in range(n_fluke):
+            sel = np.nonzero(tail & (y >= bins[k]) & (y < bins[k + 1]))[0]
+            if len(sel):
+                out[f"fluke_te_{k:02d}"] = int(sel[np.argmin(x[sel])])                       # hindmost at this span position
+    return out
 
 
 def landmark_positions(indices: dict, vertices_cm: np.ndarray) -> dict:

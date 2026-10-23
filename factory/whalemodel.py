@@ -145,6 +145,101 @@ class WhaleModel:
             lib = self._library = indiv.load_library()
         return lib
 
+    def dorsal_fin(self) -> dict:
+        """The rig's dorsal fin, read off its own rest mesh (self.rest, project frame; the canonical frame is a per-slice
+        warp onto the K9239 whale that fabricates a peak at the K9239 fin position and must not be used for this).
+        The fin is the thin midline blade standing above the back: protrusion = midline height over the shoulder line
+        (15 < |y| < 40, 90th percentile per 8 cm of x). Returns the tip / back-junction / front-junction vertex indices,
+        the trailing- and leading-edge chains (tip -> junction, n points each), the per-vertex protrusion (cm) and a
+        smooth membership weight for the individual edits. Cached; {} when no blade is found."""
+        cached = self.__dict__.get("_dorsal_fin")
+        if cached is not None:
+            return cached
+        out = {}
+        if self.kind == "humpback4k":
+            R = self.rest; x, y, z = R[:, 0], R[:, 1], R[:, 2]
+            length = x.max() - x.min(); xm = x.min()
+            lo, hi = xm + 0.30 * length, xm + 0.55 * length                       # the back from the tail stock to mid-body
+            step = 4.0; edges = np.arange(lo, hi + step, step); cx = (edges[:-1] + edges[1:]) / 2
+            # dorsal midline only: above the slab's median height (the belly has midline vertices too)
+            slab_mid = np.array([np.median(z[(x >= a_ - 20) & (x < b_ + 20)]) if ((x >= a_ - 20) & (x < b_ + 20)).any() else np.nan for a_, b_ in zip(edges[:-1], edges[1:])])
+            okm = ~np.isnan(slab_mid); slab_mid = np.interp(x, cx[okm], slab_mid[okm]) if okm.sum() >= 2 else np.full_like(x, np.median(z))
+            mid = (np.abs(y) < 8.0) & (z > slab_mid)
+            top = np.array([z[mid & (x >= a_) & (x < b_)].max() if (mid & (x >= a_) & (x < b_)).any() else np.nan for a_, b_ in zip(edges[:-1], edges[1:])])
+            ok = ~np.isnan(top)
+            if ok.sum() >= 10:
+                top = np.interp(cx, cx[ok], top[ok])
+                # the back ridge without the fin: running median over +-48 cm (the blade is ~20 cm long)
+                k = 12; ridge = np.array([np.median(top[max(i - k, 0): i + k + 1]) for i in range(len(top))])
+                excess = top - ridge
+                k_tip = int(np.argmax(excess))
+                if excess[k_tip] > 8.0:
+                    # contiguous blade bins around the tip bin
+                    k0 = k_tip
+                    while k0 > 0 and excess[k0 - 1] > 3.0:
+                        k0 -= 1
+                    k1 = k_tip
+                    while k1 < len(excess) - 1 and excess[k1 + 1] > 3.0:
+                        k1 += 1
+                    x0, x1 = edges[k0] - 2.0, edges[k1 + 1] + 2.0
+                    base = np.interp(x, cx, ridge)
+                    blade = mid & (x >= x0) & (x <= x1) & (z > base + 3.0)
+                    sel = np.nonzero(blade)[0]
+                    if len(sel) >= 6:
+                        tip = int(sel[np.argmax((z - base)[sel])])
+                        h = np.where(blade, z - base, 0.0); h = np.clip(h, 0.0, None)
+                        # The outline is the blade's midline edge loop (|y| < 1 cm: the vertices where the two faces meet);
+                        # side-face vertices would zigzag. Trailing edge = loop vertices behind the tip ordered by
+                        # descending height, leading edge = those ahead of it; each chain is resampled at n points along
+                        # its length, using midpoints of consecutive loop vertices (index pairs -> mean) so the points lie on
+                        # the rendered mesh edges. Chain index 00 = tip, n-1 = junction with the back.
+                        n_chain = 12
+                        # the loop runs down to the base: midline vertices in the blade's x-range from the ridge line up
+                        loop = np.nonzero(mid & (x >= x0) & (x <= x1) & (np.abs(y) < 1.0) & (z >= base - 0.5))[0]
+                        if tip not in loop:
+                            loop = np.append(loop, tip)
+                        rear = loop[x[loop] <= x[tip] + 0.5]; fore = loop[x[loop] >= x[tip] - 0.5]
+                        rear = rear[np.argsort(-h[rear])]; fore = fore[np.argsort(-h[fore])]        # tip first, base last
+
+                        def monotone(chain, sign):
+                            """Drop loop vertices that step back along the body (sign -1: rearward chain, +1: forward)."""
+                            keep = [int(tip)]
+                            for i in chain:
+                                if i == tip:
+                                    continue
+                                if sign * (x[i] - x[keep[-1]]) >= -1.0:
+                                    keep.append(int(i))
+                            return keep
+                        rear = monotone(rear, -1); fore = monotone(fore, +1)
+
+                        def resample(chain, n):
+                            if len(chain) < 2:
+                                return [tip] * n
+                            pts = R[chain]; seg = np.linalg.norm(np.diff(pts, axis=0), axis=1); arc = np.concatenate([[0.0], np.cumsum(seg)])
+                            out_pts = []
+                            for tt in np.linspace(0.0, arc[-1], n):
+                                k = int(np.clip(np.searchsorted(arc, tt, side="right") - 1, 0, len(chain) - 2))
+                                f = (tt - arc[k]) / max(seg[k], 1e-6); q = int(round(f * 4))        # quarter steps along the edge
+                                i, j = chain[k], chain[k + 1]
+                                out_pts.append(i if q == 0 else j if q == 4 else [i] * (4 - q) + [j] * q)   # a list = mean of its vertices
+                            return out_pts
+                        trailing, leading = rear, fore
+                        back = int(rear[-1]); front = int(fore[np.argmax(x[fore])])
+                        tw = np.clip((h - 1.0) / 8.0, 0.0, 1.0)
+                        out = {"tip": tip, "back": back, "front": front, "fin_te": resample(trailing, n_chain), "fin_le": resample(leading, n_chain),
+                               "h": h, "w": tw * tw * (3 - 2 * tw), "chord": float(np.linalg.norm(R[front] - R[back])), "n_blade": int(blade.sum()),
+                               "excess_cm": float(excess[k_tip]), "x_range": (float(x0), float(x1))}
+        self._dorsal_fin = out
+        return out
+
+    def dorsal_region(self) -> dict:
+        """Dorsal fin membership for the individual edits (factory.individuals.apply_rest): per-vertex height above the
+        fin's base (cm), a smooth weight, the tip / back / front indices and the base chord, all from dorsal_fin()."""
+        fin = self.dorsal_fin()
+        if not fin:
+            return {}
+        return {"dorsal_h": fin["h"], "dorsal_w": fin["w"], "dorsal_idx": (fin["tip"], fin["back"], fin["front"]), "dorsal_chord": fin["chord"]}
+
     def individual(self, ind):
         """Per-individual rig inputs (cached): rest positions per mesh (model frame) and joint offsets."""
         from factory import individuals as indiv
@@ -165,7 +260,7 @@ class WhaleModel:
         # Edit in the skinned rest pose (project frame, where the joint positions live), then map the edited
         # vertices back to bind space through each vertex's exact blended skin matrix.
         joints = self.rig.joint_positions(None)
-        regions = self.rig.pec_regions()
+        regions = {**self.rig.pec_regions(), **self.dorsal_region()}
         positions = {}
         for mi in range(len(self.rig.js["meshes"])):
             rest_world = self.rig.pose(None, mi)
@@ -378,6 +473,14 @@ class WhaleModel:
             if ref_idx.get(name) is not None:
                 p = project.landmark_positions({name: ref_idx[name]}, self.reference)[name]
                 idx[name] = int(np.argmin(((self.canonical - p) ** 2).sum(1)))
+        # the dorsal fin from the rig's own geometry (the canonical warp puts a phantom fin at the K9239 fin position)
+        fin = self.dorsal_fin()
+        if fin:
+            idx = {k: v for k, v in idx.items() if not k.startswith(("fin_te_", "fin_le_"))}
+            idx["dorsal_fin_tip"], idx["dorsal_fin_back"], idx["dorsal_fin_front"] = fin["tip"], fin["back"], fin["front"]
+            for prefix in ("fin_te", "fin_le"):
+                for k, i in enumerate(fin[prefix]):
+                    idx[f"{prefix}_{k:02d}"] = [int(j) for j in i] if isinstance(i, list) else int(i)   # a pair = the edge's midpoint
         return {k: v for k, v in idx.items() if v is not None}
 
     def write_obj(self, vertices: np.ndarray, path: Path, comment: str = "posed whale") -> None:

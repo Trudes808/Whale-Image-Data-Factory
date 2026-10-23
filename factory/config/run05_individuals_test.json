@@ -1,0 +1,419 @@
+{
+ "description": "run05 individuals review: every adult of the widened library in turn (individual_cycle), poses cycling surface / back_arch / fluke_up, close framing, one frame per shot; for checking the fin / fluke keypoints and edge chains before the run05 full render.",
+ "resolution": [
+  1280,
+  720
+ ],
+ "frames_per_shot": 1,
+ "batch_size": 60,
+ "pose_weights": {
+  "surface": 1,
+  "back_arch": 1,
+  "fluke_up": 1
+ },
+ "pose_jitter": {
+  "pitch_deg": 10,
+  "roll_deg": 12,
+  "breach_roll_deg": 60,
+  "clearance_scale": [
+   0.5,
+   1.6
+  ],
+  "clearance_max_m": {
+   "logging": 0.8,
+   "blow": 1.2,
+   "back_arch": 1.4,
+   "surface": 1.0,
+   "blow_sliver": 0.45,
+   "awash": 0.3,
+   "fluke_down": 1.8,
+   "fluke_up": 2.5
+  },
+  "pitch_deg_by_category": {
+   "surface": 4,
+   "logging": 5,
+   "blow": 6,
+   "blow_sliver": 5,
+   "awash": 5
+  },
+  "roll_deg_by_category": {
+   "surface": 8,
+   "logging": 10,
+   "blow": 12,
+   "blow_sliver": 10,
+   "awash": 10
+  }
+ },
+ "no_whale_in_frame_fraction": 0.0,
+ "camera": {
+  "distance_m": [
+   40,
+   160
+  ],
+  "boat_height_m": [
+   1.5,
+   4.5
+  ],
+  "elevated_fraction": 0.3,
+  "elevated_height_m": [
+   6,
+   40
+  ],
+  "fill_fraction": [
+   0.45,
+   0.85
+  ],
+  "focal_mm": [
+   100,
+   600
+  ],
+  "aim_jitter_frame_fraction": 0.1,
+  "roll_deg": 5,
+  "min_extent_frame_fraction": 0.0,
+  "min_in_frame_fraction": 0.5,
+  "max_camera_tries": 40,
+  "extent_target": [
+   0.35,
+   0.7
+  ],
+  "normal_strength_focal_mm": 250,
+  "aperture_f": [
+   4.0,
+   11.0
+  ],
+  "bearing_sectors": [
+   [
+    135,
+    225,
+    45
+   ],
+   [
+    45,
+    135,
+    20
+   ],
+   [
+    225,
+    315,
+    20
+   ],
+   [
+    -45,
+    45,
+    15
+   ]
+  ]
+ },
+ "sea_state_weights": {
+  "calm": 1,
+  "light": 1
+ },
+ "looks": {
+  "deep_blue": {
+   "weight": 35,
+   "vectors": {
+    "Absorption": [
+     5,
+     25,
+     90,
+     8
+    ],
+    "Scattering": [
+     0.5,
+     0.7,
+     1.0,
+     0.06
+    ],
+    "Water Albedo": [
+     0.25,
+     0.45,
+     0.8,
+     0.5
+    ]
+   }
+  }
+ },
+ "lighting": {
+  "sun_elevation_deg": [
+   2,
+   80
+  ],
+  "overcast_fraction": 0.25,
+  "clear_intensity": [
+   7,
+   12
+  ],
+  "overcast_intensity": [
+   1.5,
+   4.5
+  ],
+  "fog_density": [
+   0.0005,
+   0.03
+  ],
+  "exposure_ev": [
+   -1.5,
+   1.5
+  ]
+ },
+ "splash": {
+  "probability": {
+   "breach": 0.6,
+   "fluke_up": 0.3,
+   "pec_up": 0.2,
+   "spyhop": 0.2,
+   "arch": 0.15,
+   "blow": 0.15,
+   "logging": 0.0,
+   "awash": 0.0,
+   "blow_sliver": 0.0,
+   "fin_tip": 0.0,
+   "fluke_edge": 0.0,
+   "peduncle": 0.0,
+   "spyhop_low": 0.0,
+   "roll_belly": 0.0,
+   "back_arch": 0.15,
+   "fluke_down": 0.3,
+   "surface": 0.15
+  },
+  "scale_jitter": [
+   0.4,
+   1.0
+  ],
+  "amount_jitter": [
+   0.3,
+   1.0
+  ],
+  "extra_wash_fraction": 0.02
+ },
+ "body": {
+  "deform_fraction": 0.95,
+  "strength": [
+   0.7,
+   1.8
+  ],
+  "skin_weights": {
+   "00": 1
+  },
+  "length_scale": [
+   0.55,
+   1.1
+  ],
+  "wave_clearance_fraction": 0.6,
+  "wetness": {
+   "wet": [
+    0.55,
+    1.0
+   ],
+   "drying": [
+    0.15,
+    0.5
+   ],
+   "drying_fraction": 0.15
+  }
+ },
+ "labels": {
+  "through_water_depth_m": 1.5
+ },
+ "whitewater": {
+  "probability": 0.9,
+  "amount_jitter": [
+   0.4,
+   1.3
+  ],
+  "calm_fraction": 0.15
+ },
+ "skies": {
+  "directory": "third_party_assets/skies",
+  "fraction": 0.0,
+  "intensity_jitter": [
+   0.8,
+   1.25
+  ],
+  "sky_median_target": 1.5
+ },
+ "camera_fx": {
+  "noise_sigma": [
+   0.001,
+   0.006
+  ],
+  "chroma_px": [
+   0.0,
+   0.6
+  ],
+  "vignette": [
+   0.0,
+   0.2
+  ],
+  "jpeg_quality": [
+   88,
+   97
+  ]
+ },
+ "islands": {
+  "fraction": 0.5,
+  "max_count": 3,
+  "distance_m": [
+   2500,
+   18000
+  ],
+  "library": 6
+ },
+ "whale": {
+  "kind": "humpback4k"
+ },
+ "companion": {
+  "fraction": 0.0,
+  "scale": [
+   0.35,
+   0.5
+  ],
+  "lateral_cm": [
+   40,
+   300
+  ],
+  "along_cm": [
+   -500,
+   500
+  ]
+ },
+ "procedural_poses": {
+  "surface": {
+   "arch_deg": [
+    -55,
+    -30
+   ],
+   "tail_curl_deg": [
+    -25,
+    -8
+   ],
+   "head_pitch_deg": [
+    -30,
+    -12
+   ],
+   "lateral_deg": [
+    -6,
+    6
+   ],
+   "arch_centre": [
+    0.36,
+    0.42
+   ],
+   "arch_span": [
+    0.45,
+    0.6
+   ]
+  },
+  "logging": {
+   "arch_deg": [
+    -45,
+    -25
+   ],
+   "tail_curl_deg": [
+    -20,
+    -5
+   ],
+   "head_pitch_deg": [
+    -28,
+    -12
+   ],
+   "lateral_deg": [
+    -5,
+    5
+   ],
+   "arch_centre": [
+    0.36,
+    0.42
+   ],
+   "arch_span": [
+    0.5,
+    0.65
+   ]
+  },
+  "blow": {
+   "arch_deg": [
+    -50,
+    -28
+   ],
+   "tail_curl_deg": [
+    -25,
+    -8
+   ],
+   "head_pitch_deg": [
+    -24,
+    -10
+   ],
+   "lateral_deg": [
+    -6,
+    6
+   ],
+   "arch_centre": [
+    0.4,
+    0.46
+   ],
+   "arch_span": [
+    0.45,
+    0.6
+   ]
+  },
+  "blow_sliver": {
+   "arch_deg": [
+    -55,
+    -30
+   ],
+   "tail_curl_deg": [
+    -25,
+    -8
+   ],
+   "head_pitch_deg": [
+    -30,
+    -12
+   ],
+   "lateral_deg": [
+    -6,
+    6
+   ],
+   "arch_centre": [
+    0.36,
+    0.44
+   ],
+   "arch_span": [
+    0.45,
+    0.6
+   ]
+  },
+  "awash": {
+   "arch_deg": [
+    -55,
+    -30
+   ],
+   "tail_curl_deg": [
+    -25,
+    -8
+   ],
+   "head_pitch_deg": [
+    -30,
+    -12
+   ],
+   "lateral_deg": [
+    -6,
+    6
+   ],
+   "arch_centre": [
+    0.36,
+    0.44
+   ],
+   "arch_span": [
+    0.45,
+    0.6
+   ]
+  }
+ },
+ "_note": "review render for run05; not a training config; frames render at 1280x720 (the MRQ preset's output size), the 1920x1080 request was not honoured",
+ "individual_cycle": true,
+ "pose_cycle": [
+  "surface",
+  "back_arch",
+  "fluke_up"
+ ]
+}

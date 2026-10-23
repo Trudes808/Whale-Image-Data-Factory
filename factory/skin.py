@@ -38,13 +38,13 @@ def make_variant(base: np.ndarray, seed: int) -> tuple[np.ndarray, dict]:
     img = base.astype(np.float32) / 255.0
     recipe = {"seed": seed}
     # Tone: darkness multiplier and a slight hue shift (brownish or bluish black).
-    darkness = float(rng.uniform(0.7, 1.35))
-    tint = np.array([rng.uniform(0.92, 1.1), rng.uniform(0.95, 1.05), rng.uniform(0.92, 1.12)], np.float32)
+    darkness = float(rng.uniform(0.55, 1.5))
+    tint = np.array([rng.uniform(0.88, 1.14), rng.uniform(0.93, 1.07), rng.uniform(0.88, 1.16)], np.float32)
     recipe.update(darkness=round(darkness, 3), tint=[round(float(t), 3) for t in tint])
     dark = img.mean(axis=2, keepdims=True) < 0.35          # only the dark skin, keep the white areas white
     img = np.where(dark, np.clip(img * darkness * tint, 0, 1), img)
     # Mottling: patches of lighter pigment.
-    amount = float(rng.uniform(0.0, 0.35))
+    amount = float(rng.uniform(0.0, 0.55))
     mottle = _noise(rng, (h, w), scale=int(rng.integers(120, 400)))
     mottle = np.clip((mottle - 0.55) * 3.0, 0, 1)[..., None] * amount
     img = np.clip(img + mottle * np.array([0.45, 0.45, 0.47], np.float32) * dark, 0, 1)
@@ -52,7 +52,7 @@ def make_variant(base: np.ndarray, seed: int) -> tuple[np.ndarray, dict]:
     # Scars and barnacles drawn on an overlay layer.
     overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
-    n_rakes = int(rng.integers(0, 5))
+    n_rakes = int(rng.integers(0, 9))
     for _ in range(n_rakes):
         cx, cy = rng.uniform(0.05, 0.95) * w, rng.uniform(0.05, 0.6) * h
         angle = rng.uniform(0, np.pi)
@@ -64,12 +64,12 @@ def make_variant(base: np.ndarray, seed: int) -> tuple[np.ndarray, dict]:
             x0, y0 = cx + ox - np.cos(angle) * length / 2, cy + oy - np.sin(angle) * length / 2
             x1, y1 = cx + ox + np.cos(angle) * length / 2, cy + oy + np.sin(angle) * length / 2
             draw.line([(x0, y0), (x1, y1)], fill=(235, 230, 225, int(rng.uniform(120, 220))), width=int(rng.uniform(2, 5)))
-    n_round = int(rng.integers(0, 12))
+    n_round = int(rng.integers(0, 24))
     for _ in range(n_round):
         cx, cy = rng.uniform(0.05, 0.95) * w, rng.uniform(0.05, 0.6) * h
         r = rng.uniform(6, 22)
         draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(220, 215, 210, int(rng.uniform(100, 200))))
-    n_barnacle_clusters = int(rng.integers(0, 6))
+    n_barnacle_clusters = int(rng.integers(0, 12))
     for _ in range(n_barnacle_clusters):
         cx, cy = rng.uniform(0.05, 0.95) * w, rng.uniform(0.05, 0.95) * h
         for _ in range(int(rng.integers(6, 30))):

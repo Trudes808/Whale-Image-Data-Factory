@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
@@ -32,6 +33,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 ASSET_DIR = REPO_ROOT / "third_party_assets" / "humpback_4k"
 LIBRARY = ASSET_DIR / "individuals.json"
 SKINS_DIR = ASSET_DIR / "skins"
+LEGACY_DORSAL = os.environ.get("WF_LEGACY_DORSAL", "") == "1"      # re-label run04 with its own (pre-2026-10-20) fin edits
 BASE_TEXTURE = ASSET_DIR / "converted" / "T_Humpback4k_BaseColor.png"
 
 # spine joints in nose -> fluke order (project-frame x decreasing); the rig's names
@@ -59,6 +61,11 @@ class Individual:
     pec_len: float = 1.0            # pectoral length scale
     dorsal_height: float = 1.0      # dorsal fin height scale (the asset's fin is a small one; real fins run stubby to tall and falcate)
     dorsal_sweep_cm: float = 0.0    # dorsal fin tip moved back (+) or forward (-)
+    dorsal_edge_cm: float = 0.0     # dorsal fin trailing-edge wear amplitude (scallops, notches): the researchers' first cue
+    dorsal_nicks: int = 0           # sharp nicks on the dorsal trailing edge
+    fluke_nicks: int = 0            # sharp nicks on the fluke trailing edge
+    fluke_tip_loss_cm: float = 0.0  # a missing piece of one fluke tip (0 = intact)
+    fluke_tip_loss_side: int = 1    # which tip (+1 right, -1 left)
     joint_deg: dict = field(default_factory=dict)   # joint name -> [roll, pitch, yaw] degrees (project axes x, y, z)
     skin_variant_seed: int = 0      # factory.skin colouring/scars seed
     fluke_class: int = 3            # 1 (white) .. 5 (black)
@@ -80,9 +87,12 @@ def sample(rng: np.random.Generator, id: str, calf: bool = False) -> Individual:
         ind.fluke_span = float(rng.uniform(0.9, 1.0)); ind.pec_len = float(rng.uniform(0.95, 1.05))
     else:
         ind.head_len = float(rng.uniform(0.92, 1.08)); ind.girth = float(rng.uniform(0.93, 1.07)); ind.peduncle = float(rng.uniform(0.9, 1.1))
-        ind.fluke_span = float(rng.uniform(0.9, 1.12)); ind.pec_len = float(rng.uniform(0.92, 1.1))
-    ind.dorsal_height = float(rng.uniform(0.8, 1.2)) if calf else float(rng.uniform(0.7, 1.6)); ind.dorsal_sweep_cm = float(rng.uniform(-15, 15))
-    ind.fluke_sweep_cm = float(rng.uniform(-20, 25)); ind.fluke_notch_cm = float(rng.uniform(0, 18)); ind.fluke_edge_cm = float(rng.uniform(0, 12) ** 1.3 / 12 ** 0.3)
+        ind.fluke_span = float(rng.uniform(0.85, 1.2)); ind.pec_len = float(rng.uniform(0.9, 1.12))
+    # run05: wider ranges on purpose, so fin / fluke landmarks must be found on fins of every height, sweep and wear
+    ind.dorsal_height = float(rng.uniform(0.8, 1.3)) if calf else float(rng.uniform(0.5, 2.0)); ind.dorsal_sweep_cm = float(rng.uniform(-25, 40))
+    ind.dorsal_edge_cm = float(rng.uniform(0, 10) ** 1.4 / 10 ** 0.4); ind.dorsal_nicks = int(rng.integers(0, 4))
+    ind.fluke_sweep_cm = float(rng.uniform(-30, 40)); ind.fluke_notch_cm = float(rng.uniform(0, 30)); ind.fluke_edge_cm = float(rng.uniform(0, 20) ** 1.3 / 20 ** 0.3)
+    ind.fluke_nicks = int(rng.integers(0, 7)); ind.fluke_tip_loss_cm = float(rng.uniform(15, 60)) if rng.random() < 0.15 else 0.0; ind.fluke_tip_loss_side = int(rng.choice([-1, 1]))
     deg = {}
     # resting angles around the keypoints: fluke pitch, tail-stock set, head set, pectoral set; small, per joint
     deg["joint62_011"] = [0.0, float(rng.normal(0, 4)), float(rng.normal(0, 1.5))]
@@ -99,7 +109,10 @@ def sample(rng: np.random.Generator, id: str, calf: bool = False) -> Individual:
     return ind
 
 
-def load_library(path: Path = LIBRARY) -> dict[str, Individual]:
+def load_library(path: Path | None = None) -> dict[str, Individual]:
+    """The individual library; WF_INDIVIDUALS=<json> selects another file (e.g. individuals_run04.json to re-label
+    a run rendered with an earlier library)."""
+    path = Path(os.environ["WF_INDIVIDUALS"]) if (path is None and os.environ.get("WF_INDIVIDUALS")) else (path or LIBRARY)
     if not path.exists():
         return {}
     return {k: Individual.from_dict(v) for k, v in json.loads(path.read_text()).items()}
@@ -135,7 +148,11 @@ def apply_rest(V: np.ndarray, ind: Individual, joints: dict, regions: dict) -> n
     # 2. girth (whole body, fading out on the flukes) and peduncle (tail stock) about the spine
     x_fluke0 = joints["joint60_09"][0]
     g = 1.0 + (ind.girth - 1.0) * (1 - _smooth(-x, -x_fluke0, -x_fluke0 + 90))
-    pw = _smooth(x, joints["joint61_010"][0], joints["joint59_08"][0]) * (1 - _smooth(x, joints["joint56_05"][0], joints["joint54_03"][0]))
+    # tail stock only: full behind joint59, gone by joint56 (the dorsal fin sits between joint56 and joint55)
+    if LEGACY_DORSAL:                                   # run04-era fade (reached into the fin region)
+        pw = _smooth(x, joints["joint61_010"][0], joints["joint59_08"][0]) * (1 - _smooth(x, joints["joint56_05"][0], joints["joint54_03"][0]))
+    else:
+        pw = _smooth(x, joints["joint61_010"][0], joints["joint59_08"][0]) * (1 - _smooth(x, joints["joint57_06"][0], joints["joint56_05"][0]))
     g = g * (1.0 + (ind.peduncle - 1.0) * pw)
     V[:, 1] = y * g
     V[:, 2] = z_spine + (z - z_spine) * g
@@ -155,25 +172,59 @@ def apply_rest(V: np.ndarray, ind: Individual, joints: dict, regions: dict) -> n
     rng = np.random.default_rng(ind.seed)
     wear = ind.fluke_edge_cm * _value_noise_1d(rng, 28, (y + span_max) / (2 * span_max))
     nick = np.zeros_like(x)
-    for _ in range(int(rng.integers(0, 4))):          # a few sharp nicks (orca rake / entanglement)
+    for _ in range(int(ind.fluke_nicks if ind.fluke_nicks else rng.integers(0, 4))):          # sharp nicks (orca rake / entanglement)
         yc = float(rng.uniform(-span_max * 0.9, span_max * 0.9)); wd = float(rng.uniform(6, 18)); dp = float(rng.uniform(4, 14))
         nick += dp * np.exp(-((y - yc) / wd) ** 2)
+    if ind.fluke_tip_loss_cm > 0:                      # a missing tip piece: the trailing edge pulled forward near one tip
+        tip_w = np.clip((np.abs(y) - (span_max - ind.fluke_tip_loss_cm * 1.5)) / (ind.fluke_tip_loss_cm * 1.5), 0, 1) * (np.sign(y) == ind.fluke_tip_loss_side)
+        nick += ind.fluke_tip_loss_cm * tip_w ** 2
     V[:, 0] = x + te * (notch + np.clip(wear, -ind.fluke_edge_cm, ind.fluke_edge_cm) + nick)
-    # 3b. dorsal fin: height about the local back line and tip sweep, on the thin midline part of the fin only
-    if abs(ind.dorsal_height - 1.0) > 1e-6 or abs(ind.dorsal_sweep_cm) > 1e-6:
-        xr = (x > joints["joint59_08"][0] - 60) & (x < joints["joint56_05"][0] + 40)      # the fin's stretch of back
-        side = xr & (np.abs(y) > 25) & (np.abs(y) < 60)
-        if side.any():
-            bins = np.linspace(x[xr].min(), x[xr].max(), 12)
-            centres = (bins[:-1] + bins[1:]) / 2
-            back = np.array([np.percentile(z[side & (x >= a) & (x < b)], 90) if (side & (x >= a) & (x < b)).any() else np.nan for a, b in zip(bins[:-1], bins[1:])])
-            okb = ~np.isnan(back)
-            back_line = np.interp(x, centres[okb], back[okb])
-            h = z - back_line
-            wd = _smooth(h, 4.0, 18.0) * xr * (np.abs(y) < 30)
-            V[:, 2] = z + (ind.dorsal_height - 1.0) * np.clip(h, 0, None) * wd
-            V[:, 0] = x - ind.dorsal_sweep_cm * wd * np.clip(h, 0, None) / max(float(np.clip(h, 0, None).max()), 1.0)
-            x, z = V[:, 0], V[:, 2]
+    # 3b. dorsal fin: height, sweep and trailing-edge wear on the fin proper. Membership comes from the canonical mesh
+    # (WhaleModel.dorsal_region: height above the back-junction -> front-junction base line; vertex indices are shared
+    # with the rig's rest mesh), directions from the rest frame: "up" = base midpoint -> tip, "along" = back junction ->
+    # front junction (towards the head). The rig's rest pose is a curled, pitched whale, so neither z nor x would do.
+    if LEGACY_DORSAL:
+        # The run04-era block, kept verbatim so that run04 (rendered 2026-10-14..16 with it) can be re-labelled with
+        # geometry that matches its frames: window behind the fin, height above a flank-percentile back line, z scaling.
+        if abs(ind.dorsal_height - 1.0) > 1e-6 or abs(ind.dorsal_sweep_cm) > 1e-6:
+            xr = (x > joints["joint59_08"][0] - 60) & (x < joints["joint56_05"][0] + 40)
+            side = xr & (np.abs(y) > 25) & (np.abs(y) < 60)
+            if side.any():
+                bins = np.linspace(x[xr].min(), x[xr].max(), 12)
+                centres = (bins[:-1] + bins[1:]) / 2
+                back = np.array([np.percentile(z[side & (x >= a) & (x < b)], 90) if (side & (x >= a) & (x < b)).any() else np.nan for a, b in zip(bins[:-1], bins[1:])])
+                okb = ~np.isnan(back)
+                back_line = np.interp(x, centres[okb], back[okb])
+                h = z - back_line
+                wd = _smooth(h, 4.0, 18.0) * xr * (np.abs(y) < 30)
+                hmax = max(float(np.clip(h, 0, None).max()), 1.0)
+                V[:, 2] = z + (ind.dorsal_height - 1.0) * np.clip(h, 0, None) * wd
+                V[:, 0] = x - ind.dorsal_sweep_cm * wd * np.clip(h, 0, None) / hmax
+                x, z = V[:, 0], V[:, 2]
+    elif "dorsal_w" in regions and (abs(ind.dorsal_height - 1.0) > 1e-6 or abs(ind.dorsal_sweep_cm) > 1e-6 or ind.dorsal_edge_cm > 0 or ind.dorsal_nicks > 0):
+        wd = regions["dorsal_w"]; tip_i, back_i, front_i = regions["dorsal_idx"]
+        scale = float(np.linalg.norm(V[front_i] - V[back_i])) / max(float(regions["dorsal_chord"]), 1e-6)
+        hc = regions["dorsal_h"] * scale                                      # height above the base, rest-frame cm
+        hmax = max(float(hc[tip_i]), 1.0)
+        up = V[tip_i] - (V[back_i] + V[front_i]) / 2.0; up = up / max(np.linalg.norm(up), 1e-6)
+        along = V[front_i] - V[back_i]; along = along / max(np.linalg.norm(along), 1e-6)
+        V += np.outer((ind.dorsal_height - 1.0) * hc * wd, up)
+        V -= np.outer(ind.dorsal_sweep_cm * wd * hc / hmax, along)
+        # trailing-edge wear: vertices on the fin's rear side (behind the fin's centre at that height) move forward by a
+        # height-indexed scallop profile plus sharp nicks, like the fluke's edge
+        if (ind.dorsal_edge_cm > 0 or ind.dorsal_nicks > 0) and (wd > 0.2).any():
+            fin = wd > 0.2; hz = hc / hmax
+            s_along = (V - V[back_i]) @ along
+            sc = np.interp(hz, np.linspace(0, 1, 8), [np.median(s_along[fin & (np.abs(hz - t) < 0.1)]) if (fin & (np.abs(hz - t) < 0.1)).any() else np.median(s_along[fin]) for t in np.linspace(0, 1, 8)])
+            rear = _smooth(sc - s_along, 0.0, 12.0) * wd
+            rng_d = np.random.default_rng(ind.seed + 7)
+            scallop = ind.dorsal_edge_cm * _value_noise_1d(rng_d, 10, hz)
+            nick_d = np.zeros(len(V))
+            for _ in range(int(ind.dorsal_nicks)):
+                hcn = float(rng_d.uniform(0.2, 0.95)); wn = float(rng_d.uniform(0.03, 0.08)); dp = float(rng_d.uniform(3, 9))
+                nick_d += dp * np.exp(-((hz - hcn) / wn) ** 2)
+            V += np.outer(rear * (np.clip(scallop, -ind.dorsal_edge_cm, ind.dorsal_edge_cm) + nick_d), along)
+        x, y, z = V[:, 0], V[:, 1], V[:, 2]
     # 4. pectoral length about the fin root along the fin axis
     for side, root_name, tip_name in (("pec_left", PEC_LEFT[0], PEC_LEFT[-1]), ("pec_right", PEC_RIGHT[0], PEC_RIGHT[-1])):
         w = regions.get(side)                       # per-vertex chain skin weight (smooth), or None for meshes without fins

@@ -46,8 +46,8 @@ def log_uniform(rng: np.random.Generator, lo: float, hi: float) -> float:
     return float(math.exp(rng.uniform(math.log(lo), math.log(hi))))
 
 
-def sample_pose(rng: np.random.Generator, config: dict) -> tuple[str, poses.Pose]:
-    name = weighted_choice(rng, config["pose_weights"])
+def sample_pose(rng: np.random.Generator, config: dict, name: str | None = None) -> tuple[str, poses.Pose]:
+    name = name or weighted_choice(rng, config["pose_weights"])
     base = poses.POSES[name]
     jitter = config["pose_jitter"]
     roll_jitter = jitter["breach_roll_deg"] if name == "breach" else jitter.get("roll_deg_by_category", {}).get(name, jitter["roll_deg"])
@@ -294,7 +294,9 @@ def sample_companion(rng: np.random.Generator, config: dict, model, category: st
 
 def make_shot(index: int, rng: np.random.Generator, config: dict, vertices_cm: np.ndarray,
               fin_regions: dict | None = None, model: WhaleModel | None = None) -> dict:
-    category, pose = sample_pose(rng, config)
+    cycle = config.get("pose_cycle")                 # review renders: after the individual cycle, categories in turn
+    n_cycle = max(1, len([k for k in model.individuals() if k.startswith("i")])) if (cycle and model is not None and config.get("individual_cycle")) else 1
+    category, pose = sample_pose(rng, config, name=cycle[(index // n_cycle) % len(cycle)] if cycle else None)
     clip_t = sample_clip_time(rng, category) if (model is not None and model.kind == "humpback4k") else None
     if clip_t is not None and pose.pitch_deg < 0 and category not in poses.BACK_HEIGHT_CATEGORIES and category not in HEAD_UNDER_CATEGORIES:
         # tail-up categories: the keyframe already lifts the fluke; take most of that out of the nose-down pitch
@@ -350,7 +352,8 @@ def make_shot(index: int, rng: np.random.Generator, config: dict, vertices_cm: n
     if model is not None and model.kind == "humpback4k":
         adults = sorted(k for k in model.individuals() if k.startswith("i"))
         if adults:
-            individual = adults[int(rng.integers(len(adults)))]
+            # individual_cycle (review renders): shot i gets adult i mod N, so every individual appears in turn
+            individual = adults[index % len(adults)] if config.get("individual_cycle") else adults[int(rng.integers(len(adults)))]
             skin = individual                      # the individual's texture is its skin instance
     # Wet skin: a whale that just surfaced is glossy (water sheeting); it dulls as it dries. RoughnessScale
     # multiplies the authored roughness (0.85 was the fixed value through run03).
