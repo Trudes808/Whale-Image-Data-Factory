@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from pathlib import Path
 
 import numpy as np
@@ -27,6 +28,13 @@ from factory import deform, poses, project
 REPO_ROOT = Path(__file__).resolve().parents[1]
 K9239_OBJ = REPO_ROOT / "third_party_assets" / "humpback_k9239" / "converted" / "SM_Humpback.obj"
 HUMPBACK4K_GLTF = REPO_ROOT / "third_party_assets" / "humpback_4k" / "src_gltf" / "scene.gltf"
+# The dorsal_fin_front label: distance from the fin tip in units of the tip -> back-junction distance, along the dorsal
+# midline ahead of the blade. The researcher's definition of the fin front is the front of the whole fin / hump, where
+# its leading slope flattens into the back (not the blade's root); on 200 labelled real photos (2024-12-18, 2025-01-02,
+# 2026-11-02) that point sits at a median 2.2 x |tip - back junction| from the tip (IQR 1.6-2.8, ~80 deg from the
+# tip -> back direction). This asset has no hump (ahead of the blade the ridge runs straight on), so the label is placed
+# by the ratio; 2.0 in the curled rest frame = ~2.2 in the levelled straight clip poses the renders use.
+DORSAL_FRONT_RATIO = float(os.environ.get("WF_DORSAL_FRONT_RATIO", 2.0))
 
 # Keyframes (clip seconds) per pose category, hand-picked from the clip (see data/renders/h4k_test3/keyframes
 # sheet): a few body shapes each, never an arbitrary frame of the breach sequence. The category's own
@@ -226,11 +234,36 @@ class WhaleModel:
                         trailing, leading = rear, fore
                         back = int(rear[-1]); front = int(fore[np.argmax(x[fore])])
                         tw = np.clip((h - 1.0) / 8.0, 0.0, 1.0)
-                        out = {"tip": tip, "back": back, "front": front, "fin_te": resample(trailing, n_chain), "fin_le": resample(leading, n_chain),
+                        # The dorsal_fin_front label (front_base) is not the blade's root: see DORSAL_FRONT_RATIO. The blade
+                        # root (front) stays the base-chord end for dorsal_region() / the individual edits and the fin_le chain.
+                        out = {"tip": tip, "back": back, "front": front, "front_base": self._dorsal_front_base(R, mid, tip, back, front),
+                               "fin_te": resample(trailing, n_chain), "fin_le": resample(leading, n_chain),
                                "h": h, "w": tw * tw * (3 - 2 * tw), "chord": float(np.linalg.norm(R[front] - R[back])), "n_blade": int(blade.sum()),
                                "excess_cm": float(excess[k_tip]), "x_range": (float(x0), float(x1))}
         self._dorsal_fin = out
         return out
+
+    @staticmethod
+    def _dorsal_front_base(R: np.ndarray, mid: np.ndarray, tip: int, back: int, front: int, ratio: float | None = None):
+        """The dorsal_fin_front label point: on the dorsal midline ahead of the blade root, where the straight-line
+        distance from the tip is ratio x |tip - back junction| (DORSAL_FRONT_RATIO), in quarter steps along the
+        mesh edges. A vertex index, or an index list whose mean is the point (as for the chains)."""
+        ratio = DORSAL_FRONT_RATIO if ratio is None else ratio
+        x, y = R[:, 0], R[:, 1]
+        ahead = np.nonzero(mid & (np.abs(y) < 1.0) & (x > x[front] - 0.5) & (x < x[front] + 300.0))[0]
+        chain = [int(front)]
+        for i in ahead[np.argsort(x[ahead])]:
+            if i != front and x[i] - x[chain[-1]] > 0.5:            # one vertex per position (seam duplicates coincide)
+                chain.append(int(i))
+        target = ratio * float(np.linalg.norm(R[back] - R[tip]))
+        best, best_err = int(front), abs(float(np.linalg.norm(R[front] - R[tip])) - target)
+        for i, j in zip(chain[:-1], chain[1:]):
+            for q in range(1, 5):
+                p = R[i] + (R[j] - R[i]) * (q / 4.0)
+                err = abs(float(np.linalg.norm(p - R[tip])) - target)
+                if err < best_err:
+                    best, best_err = (j if q == 4 else [i] * (4 - q) + [j] * q), err
+        return best
 
     def dorsal_region(self) -> dict:
         """Dorsal fin membership for the individual edits (factory.individuals.apply_rest): per-vertex height above the
@@ -473,11 +506,13 @@ class WhaleModel:
             if ref_idx.get(name) is not None:
                 p = project.landmark_positions({name: ref_idx[name]}, self.reference)[name]
                 idx[name] = int(np.argmin(((self.canonical - p) ** 2).sum(1)))
-        # the dorsal fin from the rig's own geometry (the canonical warp puts a phantom fin at the K9239 fin position)
+        # the dorsal fin from the rig's own geometry (the canonical warp puts a phantom fin at the K9239 fin position);
+        # dorsal_fin_front = the front of the whole fin / hump (front_base, the researcher's definition since 2026-11-02),
+        # fin_le_11 = the blade's root
         fin = self.dorsal_fin()
         if fin:
             idx = {k: v for k, v in idx.items() if not k.startswith(("fin_te_", "fin_le_"))}
-            idx["dorsal_fin_tip"], idx["dorsal_fin_back"], idx["dorsal_fin_front"] = fin["tip"], fin["back"], fin["front"]
+            idx["dorsal_fin_tip"], idx["dorsal_fin_back"], idx["dorsal_fin_front"] = fin["tip"], fin["back"], fin.get("front_base", fin["front"])
             for prefix in ("fin_te", "fin_le"):
                 for k, i in enumerate(fin[prefix]):
                     idx[f"{prefix}_{k:02d}"] = [int(j) for j in i] if isinstance(i, list) else int(i)   # a pair = the edge's midpoint

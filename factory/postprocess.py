@@ -131,6 +131,11 @@ def height_above_local_water(deformed_xyz: np.ndarray, whale: dict, waves, wave_
     out[defined] = (world[:, 2] - water).astype(np.float32)
     return out
 WATER_Z_CM = 0.0            # shots are placed against the mean water plane at z = 0 (factory.poses.place)
+# Revision of the keypoint definitions, written to every meta. 2026-11-02: dorsal_fin_front = the front of the whole fin /
+# hump (WhaleModel.DORSAL_FRONT_RATIO), no longer the blade's root; runs labelled before it are refreshed in place with
+# --keypoints-only (RELABEL_MOVED = the keypoints that revision moves; every other one must reproduce exactly).
+KEYPOINT_REVISION = "2026-11-02-fin-front"
+RELABEL_MOVED = {"dorsal_fin_front"}
 THROUGH_WATER_DEPTH_M = 1.5  # default for runs whose config has no "labels" section (run01)
 PART_PALETTE = [0, 0, 0, 60, 120, 255, 40, 200, 200, 255, 220, 40, 255, 120, 40, 230, 60, 200]
 
@@ -161,6 +166,66 @@ def mask_stats(mask: np.ndarray) -> dict:
     return stats
 
 
+def shot_geometry(shot: dict, vertices: np.ndarray, faces: np.ndarray) -> tuple:
+    """The shot's whale in its own frame: (posed geometry, canonical vertices, faces, scaled undeformed base)."""
+    scale = float(shot.get("body_scale", 1.0))
+    if MODEL is not None and MODEL.kind != "k9239":
+        return MODEL.posed(shot), MODEL.canonical, MODEL.faces, MODEL.canonical * scale
+    params = deform.params_from_dict(shot.get("deform"))
+    base = vertices * scale if abs(scale - 1.0) > 1e-6 else vertices
+    geometry = base if params.is_identity() else deform.deform(base, params, deform.fin_regions(base))
+    return geometry, vertices, faces, base
+
+
+def relabel_keypoints(run_dir: Path, shot_id: str, vertices: np.ndarray, faces: np.ndarray, points: dict | None,
+                      write: bool = True) -> dict:
+    """Recompute an already processed shot's keypoints the way process_shot did: the posed mesh from the meta (the
+    shot) rasterized again for the depth buffer (the saved depth map is no substitute: it is zeroed on the anti-aliased
+    silhouette pixels and truncated to cm, which flips edge keypoints' states), the visible mask from the dataset
+    (instances == 1 where there is a companion, else masks == 1); images and maps stay. Returns {name: px moved} for
+    the keypoints whose pixel position (> 0.15 px) or state changed. Only RELABEL_MOVED keypoints are meant to move:
+    any other one moving means the geometry was not reproduced (wrong individual library / fin code for the run:
+    individuals.LEGACY_DORSAL, WF_INDIVIDUALS), and the shot is then left untouched."""
+    ds = run_dir / "dataset"; meta_path = ds / "meta" / f"{shot_id}.json"
+    meta = json.loads(meta_path.read_text())
+    cam = meta["camera_intrinsics"]; width, height = int(cam["width"]), int(cam["height"])
+    camera = project.Camera(meta["camera"]["location"], meta["camera"]["rotation"], meta["camera"]["focal_mm"], width, height)
+    geometry, vertices, faces, _ = shot_geometry(meta, vertices, faces)
+    _, zbuf, _ = project.amodal_and_parts(geometry, faces, meta["whale"], camera, extra=True)
+    inst = ds / "instances" / f"{shot_id}.png"
+    mask = (np.asarray(Image.open(inst)) == 1) if inst.exists() else (np.asarray(Image.open(ds / "masks" / f"{shot_id}.png")) == 1)
+    keypoints = project.project_landmarks(project.landmark_positions(points or {}, geometry), meta["whale"], camera, zbuf, mask,
+                                          water_z_cm=WATER_Z_CM, canonical=project.landmark_positions(points or {}, vertices))
+    old = meta.get("keypoints") or {}
+    moved = {}
+    for name, k in keypoints.items():
+        o = old.get(name)
+        if o is None:
+            moved[name] = float("nan")
+            continue
+        d = float(np.hypot(k["uv"][0] - o["uv"][0], k["uv"][1] - o["uv"][1]))
+        if d > 0.15 or k.get("state") != o.get("state"):
+            moved[name] = d
+    if write and not (set(moved) - RELABEL_MOVED):
+        meta["keypoints"] = keypoints
+        meta["keypoint_states"] = dict(Counter(k.get("state", "unknown") for k in keypoints.values()))
+        meta["keypoint_revision"] = KEYPOINT_REVISION
+        meta_path.write_text(json.dumps(meta, indent=1))
+    return moved
+
+
+def _relabel_worker(job: tuple) -> dict:
+    """One chunk of shot ids -> {"n", "moved": Counter per keypoint, "unexpected": [(id, name, px)]}."""
+    ids, write = job
+    w = _WORKER
+    moved_count = Counter(); unexpected = []
+    for shot_id in ids:
+        moved = relabel_keypoints(w["run_dir"], shot_id, w["vertices"], w["faces"], w["points"], write=write)
+        moved_count.update(moved.keys())
+        unexpected += [(shot_id, name, round(px, 1)) for name, px in moved.items() if name not in RELABEL_MOVED]
+    return {"n": len(ids), "moved": moved_count, "unexpected": unexpected}
+
+
 def process_shot(shot: dict, raw_dir: Path, frame: int, out: Path, vertices: np.ndarray, faces: np.ndarray,
                  resolution, points: dict | None = None, through_water_depth_m: float = THROUGH_WATER_DEPTH_M) -> dict:
     width, height = resolution
@@ -175,12 +240,7 @@ def process_shot(shot: dict, raw_dir: Path, frame: int, out: Path, vertices: np.
     companion_mask = mask_any & ~mask
     camera = project.Camera(shot["camera"]["location"], shot["camera"]["rotation"], shot["camera"]["focal_mm"], width, height)
     scale = float(shot.get("body_scale", 1.0))
-    if MODEL is not None and MODEL.kind != "k9239":
-        geometry = MODEL.posed(shot); vertices = MODEL.canonical; faces = MODEL.faces; base = MODEL.canonical * scale
-    else:
-        params = deform.params_from_dict(shot.get("deform"))
-        base = vertices * scale if abs(scale - 1.0) > 1e-6 else vertices
-        geometry = base if params.is_identity() else deform.deform(base, params, deform.fin_regions(base))
+    geometry, vertices, faces, base = shot_geometry(shot, vertices, faces)
     amodal, zbuf, body, surface_z, canon, canon_deformed = project.amodal_and_parts(
         geometry, faces, shot["whale"], camera, extra=True, canonical_cm=vertices, world_z=True, canonical_xyz=True, deformed_xyz=True)
     check = project.check_against_mask(amodal, mask)
@@ -281,6 +341,7 @@ def process_shot(shot: dict, raw_dir: Path, frame: int, out: Path, vertices: np.
         "individual_spec": _individual_spec(shot.get("individual")),
         "keypoints": keypoints,
         "keypoint_states": dict(Counter(k.get("state", "unknown") for k in keypoints.values())),
+        "keypoint_revision": KEYPOINT_REVISION,
         "water_row_px": water_row,
         "camera_fx": fx,
         "visible": stats,
@@ -417,12 +478,50 @@ def write_manifest(run_dir: Path) -> int:
     return len(lines)
 
 
+def relabel_run(args, mesh: Path, depth_m: float, run_config: dict) -> int:
+    """--keypoints-only: every processed shot's keypoints recomputed in place (see relabel_keypoints); a summary in
+    dataset/keypoint_revision.json. Exit 1 when some shots did not reproduce (they are left as they were)."""
+    from multiprocessing import Pool
+    import datetime
+    ids = sorted(p.stem for p in (args.run_dir / "dataset" / "meta").glob("*.json"))
+    if args.limit:
+        ids = ids[: args.limit]
+    chunk = 100
+    jobs = [(ids[i: i + chunk], not args.dry_run) for i in range(0, len(ids), chunk)]
+    init = (str(args.run_dir), str(mesh), depth_m, CAMERA_FX, run_config)
+    moved = Counter(); unexpected = []; done = 0
+    if args.workers > 1:
+        with Pool(args.workers, initializer=_init_worker, initargs=init) as pool:
+            for r in pool.imap_unordered(_relabel_worker, jobs):
+                moved.update(r["moved"]); unexpected += r["unexpected"]; done += r["n"]
+                if done % 1000 < chunk:
+                    print(f"{done} / {len(ids)} shots, {len(unexpected)} not reproduced", flush=True)
+    else:
+        _init_worker(*init)
+        for job in jobs:
+            r = _relabel_worker(job)
+            moved.update(r["moved"]); unexpected += r["unexpected"]; done += r["n"]
+    bad_shots = sorted({u[0] for u in unexpected})
+    summary = {"revision": KEYPOINT_REVISION, "date": datetime.date.today().isoformat(), "dry_run": bool(args.dry_run),
+               "shots": len(ids), "moved": dict(moved), "shots_not_reproduced": len(bad_shots),
+               "not_reproduced_examples": unexpected[:20]}
+    print(json.dumps(summary, indent=1))
+    if not args.dry_run:
+        (args.run_dir / "dataset" / "keypoint_revision.json").write_text(json.dumps(summary, indent=1))
+    return 1 if bad_shots else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("run_dir", type=Path)
     parser.add_argument("--batch", action="append", help="batch name(s) to process (default: all rendered)")
     parser.add_argument("--mesh", type=Path, default=None, help="whale OBJ (default: from run_config.json)")
     parser.add_argument("--canon-only", action="store_true", help="only add canon/<id>.npz to an already processed run")
+    parser.add_argument("--keypoints-only", action="store_true",
+                        help="recompute the keypoints of the processed shots in place (revision KEYPOINT_REVISION) from the saved "
+                             "depth maps and masks; needs no raw frames. Shots whose other keypoints do not reproduce are skipped")
+    parser.add_argument("--dry-run", action="store_true", help="with --keypoints-only: compute and compare, write nothing")
+    parser.add_argument("--limit", type=int, default=0, help="with --keypoints-only: only the first N shots (by id)")
     parser.add_argument("--workers", type=int, default=1, help="processes (batches are independent)")
     args = parser.parse_args(argv)
     run_config = json.loads((args.run_dir / "run_config.json").read_text())
@@ -438,8 +537,11 @@ def main(argv: list[str] | None = None) -> int:
         vertices, faces, groups = project.load_obj(mesh, with_groups=True)
     points = MODEL.landmark_indices() if MODEL is not None else project.landmarks(vertices, groups)
     (args.run_dir / "dataset").mkdir(parents=True, exist_ok=True)
-    (args.run_dir / "dataset" / "landmarks_mesh_frame_cm.json").write_text(
-        json.dumps({k: np.round(v, 2).tolist() for k, v in project.landmark_positions(points, vertices).items()}, indent=1))
+    if not args.dry_run:
+        (args.run_dir / "dataset" / "landmarks_mesh_frame_cm.json").write_text(
+            json.dumps({k: np.round(v, 2).tolist() for k, v in project.landmark_positions(points, vertices).items()}, indent=1))
+    if args.keypoints_only:
+        return relabel_run(args, mesh, depth_m, run_config)
     raw = args.run_dir / "raw"
     names = args.batch or sorted(p.name for p in raw.iterdir() if (p / "done").exists())
     if args.canon_only:

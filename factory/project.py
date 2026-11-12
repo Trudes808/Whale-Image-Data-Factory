@@ -215,6 +215,8 @@ def landmarks(vertices_cm: np.ndarray, groups: dict | None = None) -> dict:
     x_root = float(xs[int(np.argmin(widths))] + 0.0025 * length)
     extra["spine_end"] = pick((np.abs(y) < 8) & band(x_root, 0.01 * length), z, np.argmax)
     if indices.get("dorsal_fin_tip") is not None:
+        # static K9239 model only (run03); the rig's fin labels come from WhaleModel.dorsal_fin(), whose dorsal_fin_front is
+        # the front of the whole fin / hump (DORSAL_FRONT_RATIO), not the blade's root
         xt = x[indices["dorsal_fin_tip"]]
         extra["dorsal_fin_front"] = pick(centre & band(xt + 0.06 * length, 0.015 * length), z, np.argmax)
         extra["dorsal_fin_back"] = pick(centre & band(xt - 0.05 * length, 0.015 * length), z, np.argmax)

@@ -396,6 +396,35 @@ the dorsal fin (body fraction 0.36-0.42) and the head pitched well down. `factor
   head part 7 % visible), `r05_test4` (the four breathing categories).
 * framing: `extent_target` 0.08-0.7, focal 70-600 mm, distance 50-400 m.
 
+## Keypoint revision 2026-11-02: `dorsal_fin_front` is the front of the whole fin / hump
+
+The researcher's real-photo clicks (Whale-Review-Web `/pairs`) put the fin front where the fin's leading slope
+flattens into the back line, i.e. the front of the whole fin / hump, and the fin back at the bottom of the notch
+behind the fin. Until now the rig label was the blade's root on both sides (`WhaleModel.dorsal_fin()`: `front` /
+`back`), so the detector's synthetic fin front sat ~60 px from the tip where the clicks sit ~150 px. The rig has no
+hump (ahead of the blade the dorsal ridge runs straight on), so there is no edge to find on the mesh; the label is
+placed by the ratio measured on 200 labelled real photos instead: `DORSAL_FRONT_RATIO` (2.0, env
+`WF_DORSAL_FRONT_RATIO`) x |tip - back junction| from the tip, along the dorsal midline ahead of the blade root, in
+quarter steps along the mesh edges (`WhaleModel._dorsal_front_base`, an index list = the mean of its vertices, like
+the chains). In the curled rest frame that is ratio 2.1, in the levelled straight clip poses ~2.3; the real median
+is 2.2 (IQR 1.6-2.8).
+
+* `dorsal_fin()` returns it as `front_base`; `landmark_indices()` uses it for `dorsal_fin_front`. The blade root
+  (`front`) is unchanged and still ends the `fin_le` chain (`fin_le_11`) and the base chord of the individual
+  edits (`dorsal_region()`), so renders are identical before and after.
+* Every meta now carries `keypoint_revision` (`postprocess.KEYPOINT_REVISION`, `2026-11-02-fin-front`).
+* Processed runs are refreshed in place without re-rendering: `python3 -m factory.postprocess RUN --keypoints-only
+  [--dry-run] [--limit N] --workers N` recomputes every keypoint the way the original pass did (the posed mesh
+  rasterized again for the depth buffer; the saved depth PNG is zeroed on anti-aliased edge pixels and truncated to
+  cm, so it is not used), compares with the stored ones, and only writes shots whose other keypoints reproduce
+  exactly (the rest are reported in `dataset/keypoint_revision.json` and left alone: wrong individual library / fin
+  code for the run). `tools/relabel_fin_front.sh` did run05 and run04 (run04 with `WF_INDIVIDUALS=
+  individuals_run04.json WF_LEGACY_DORSAL=1`), ~0.7 s per shot per 8 workers; the previous entries are in
+  `dataset/keypoint_prev_dorsal_fin_front.json`. run03 (static K9239 model, `project.landmarks`) is unchanged.
+* Downstream: Dinov3-WhaleID's `part_index` caches (`experiments/part_landmarks/index/index_*_fin.json`) hold the
+  fin bbox and were deleted; `parts_v2`'s synthetic fin-front score is no longer comparable; the shape channel's fin
+  frame (`back -> front`) is twice as long.
+
 ## run05 prep: the Niagara splash pack (`Niagra_splash_pack/`, not yet in the project)
 
 A Fab pack of baked fluid simulations played back as vertex-animation-texture meshes through Niagara:
