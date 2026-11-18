@@ -174,6 +174,50 @@ def amodal_and_parts(vertices_cm: np.ndarray, faces: np.ndarray, whale: dict, ca
     return tuple(out)
 
 
+def animal_maps(vertices_cm: np.ndarray, faces: np.ndarray, whale: dict, camera: Camera, canonical_cm: np.ndarray,
+                vertex_parts: np.ndarray | None = None, n_parts: int = 5, blade_weight: np.ndarray | None = None) -> dict:
+    """Everything amodal_and_parts(extra, world_z, canonical_xyz, deformed_xyz) gives for one whale, from ONE rasterize
+    pass, plus (vertex_parts: (N,) ids 1..n_parts) the per-pixel part of the run06 taxonomy: the vertex groups as one-hot
+    vertex attributes, interpolated and arg-maxed, so a part boundary runs inside the faces it crosses. Keys: amodal
+    (BODY_PARTS ids), zbuf, body, height (world z), canon, deformed, parts (uint8, 0 = none; absent without vertex_parts).
+    Faces entirely off screen are skipped by rasterize; a whale out of frame costs little."""
+    world = transform_mesh(vertices_cm, whale)
+    uv, depth = camera.project(world)
+    old_parts = part_of_vertices(canonical_cm)
+    face_parts = _face_majority(old_parts, faces)
+    coords = body_coordinates(canonical_cm)
+    cols = [np.stack([coords[:, 0], np.sin(np.radians(coords[:, 1])), np.cos(np.radians(coords[:, 1])), world[:, 2]], axis=1),
+            np.asarray(canonical_cm, float), np.asarray(vertices_cm, float)]
+    if vertex_parts is not None:
+        onehot = np.zeros((len(vertices_cm), n_parts), float)
+        onehot[np.arange(len(vertices_cm)), np.clip(np.asarray(vertex_parts, int) - 1, 0, n_parts - 1)] = 1.0
+        cols.append(onehot)
+    if blade_weight is not None:                 # run06 round 5: the dorsal blade alone (a sub-label of the fin + hump part)
+        cols.append(np.asarray(blade_weight, float)[:, None])
+    image, zbuf, attrs = rasterize(uv, depth, faces, camera.width, camera.height, face_parts, np.concatenate(cols, axis=1), return_extra=True)
+    inside = image > 0
+    angle = (np.degrees(np.arctan2(attrs[..., 1], attrs[..., 2])) + 360.0) % 360.0
+    out = {"amodal": image, "zbuf": zbuf, "body": np.stack([attrs[..., 0], angle], axis=-1),
+           "height": np.where(inside, attrs[..., 3], np.nan),
+           "canon": np.where(inside[..., None], attrs[..., 4:7], np.nan).astype(np.float32),
+           "deformed": np.where(inside[..., None], attrs[..., 7:10], np.nan).astype(np.float32)}
+    if vertex_parts is not None:
+        out["parts"] = np.where(inside, np.argmax(attrs[..., 10:10 + n_parts], axis=-1) + 1, 0).astype(np.uint8)
+    if blade_weight is not None:
+        out["blade"] = inside & (attrs[..., -1] > 0.5)
+    return out
+
+
+def _face_majority(vertex_ids: np.ndarray, faces: np.ndarray) -> np.ndarray:
+    """Per face the id most of its vertices carry, the smallest on a three-way tie: np.bincount(ids[f]).argmax() of
+    amodal_and_parts, vectorised."""
+    a, b, c = vertex_ids[faces[:, 0]], vertex_ids[faces[:, 1]], vertex_ids[faces[:, 2]]
+    out = np.minimum(np.minimum(a, b), c)
+    out = np.where(b == c, b, out)
+    out = np.where((a == b) | (a == c), a, out)
+    return out.astype(np.int32)
+
+
 def landmarks(vertices_cm: np.ndarray, groups: dict | None = None) -> dict:
     """Named points on the mesh (mesh frame, cm), found geometrically so they hold for any
     rigidly posed copy of the model. Pectoral fins hang down on this model."""

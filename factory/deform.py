@@ -47,7 +47,7 @@ class DeformParams:
 def sample_params(rng: np.random.Generator, category: str, strength: float = 1.0) -> DeformParams:
     """Plausible deformation for a pose category (degrees), scaled by strength."""
     u = lambda lo, hi: float(rng.uniform(lo, hi)) * strength  # noqa: E731
-    category = {"fin_tip": "pec_up", "fluke_edge": "fluke_up", "fluke_down": "fluke_up", "peduncle": "arch", "back_arch": "arch", "surface": "arch", "spyhop_low": "spyhop", "roll_belly": "breach", "blow_sliver": "blow"}.get(category, category)
+    category = {"fin_tip": "pec_up", "fluke_edge": "fluke_up", "fluke_down": "fluke_up", "peduncle": "arch", "tail_stock": "arch", "back_arch": "arch", "surface": "arch", "spyhop_low": "spyhop", "roll_belly": "breach", "blow_sliver": "blow"}.get(category, category)
     if category == "fluke_up":
         p = DeformParams(arch_deg=u(0, 10), tail_curl_deg=u(-25, 25), lateral_deg=u(-15, 15), fluke_twist_deg=u(-15, 15))
     elif category == "arch":
@@ -244,6 +244,17 @@ def write_batch_meshes(batch_path, base_obj, out_dir) -> dict:
         from factory.whalemodel import WhaleModel
 
         model = WhaleModel(batch["whale_kind"])
+        if batch.get("individuals"):                     # run06 realism: the run's own individual library
+            from factory.whalemodel import REPO_ROOT
+            model.library_path = Path(batch["individuals"]) if Path(batch["individuals"]).is_absolute() else REPO_ROOT / batch["individuals"]
+        if batch.get("dorsal_front_ratio"):              # run06 round 5: the hump runs to this front base (as in shotlist / postprocess)
+            model.dorsal_front_ratio = float(batch["dorsal_front_ratio"])
+        if batch.get("ridge_soften"):                    # run06 round 8: ridge knobs toned down (as in shotlist / postprocess)
+            model.ridge_soften = float(batch["ridge_soften"])
+        if batch.get("blade_templates"):                 # run06 round 7: the parametric dorsal blade (as in shotlist / postprocess)
+            bt = Path(batch["blade_templates"])
+            from factory.whalemodel import REPO_ROOT as _R
+            model.enable_blade(bt if bt.is_absolute() else _R / bt)
         for shot in batch["shots"]:
             path = out_dir / f"{shot['id']}.obj"
             model.write_obj(model.posed(shot), path, f"{batch['whale_kind']} posed for shot {shot['id']} (clip t {(shot.get('pose') or {}).get('clip_t')})")
@@ -252,8 +263,12 @@ def write_batch_meshes(batch_path, base_obj, out_dir) -> dict:
                 cpath = out_dir / f"{shot['id']}c.obj"
                 model.write_obj(model.posed(shot["companion"]), cpath, f"{batch['whale_kind']} companion of shot {shot['id']}")
                 shot["companion"]["whale"]["mesh_obj"] = str(cpath.resolve())
+            for c in shot.get("companions") or []:          # run06 scenes: every further whale
+                cpath = out_dir / f"{shot['id']}a{c['instance_id']}.obj"
+                model.write_obj(model.posed(c), cpath, f"{batch['whale_kind']} {c.get('role')} {c['instance_id']} of shot {shot['id']}")
+                c["whale"]["mesh_obj"] = str(cpath.resolve())
         (out_dir / "batch.json").write_text(json.dumps(batch))
-        return {"shots": len(batch["shots"]), "meshes": len(batch["shots"])}
+        return {"shots": len(batch["shots"]), "meshes": len(batch["shots"]) + sum(len(s.get("companions") or []) + bool(s.get("companion")) for s in batch["shots"])}
     vertices, _ = project.load_obj(base_obj)
     regions = fin_regions(vertices)
     count = 0

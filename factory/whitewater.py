@@ -37,6 +37,7 @@ CATEGORY = {
     "surface":     dict(contact=0.55, wake=0.5, wake_len=12.0, boil=0.2, impact=0.0),
     "fluke_down":  dict(contact=0.8, wake=0.4, wake_len=8.0, boil=0.5, impact=0.0),     # water streaming off the stock and tips
     "peduncle":    dict(contact=0.70, wake=0.50, wake_len=10.0, boil=0.6, impact=0.0),
+    "tail_stock":  dict(contact=0.70, wake=0.50, wake_len=10.0, boil=0.5, impact=0.0),
     "fluke_up":    dict(contact=0.60, wake=0.30, wake_len=8.0, boil=0.9, impact=0.0),
     "fluke_edge":  dict(contact=0.50, wake=0.25, wake_len=6.0, boil=0.9, impact=0.0),
     "breach":      dict(contact=0.30, wake=0.00, wake_len=0.0, boil=0.0, impact=1.0),
@@ -47,6 +48,13 @@ CATEGORY = {
     "spyhop_low":  dict(contact=0.50, wake=0.10, wake_len=4.0, boil=0.0, impact=0.0),
     "awash":       dict(contact=0.45, wake=0.30, wake_len=8.0, boil=0.0, impact=0.0),
     "submerged":   dict(contact=0.20, wake=0.30, wake_len=8.0, boil=0.0, impact=0.0),
+    # run06 realism categories (factory.realism)
+    "fluke_rollout": dict(contact=0.85, wake=0.5, wake_len=10.0, boil=0.6, impact=0.0),     # water streaming off the stock and blades
+    "fluke_sinking": dict(contact=0.55, wake=0.2, wake_len=6.0, boil=0.8, impact=0.0),
+    "pec_slap":      dict(contact=0.65, wake=0.15, wake_len=5.0, boil=0.2, impact=0.8),
+    "head_rise":     dict(contact=0.8, wake=0.2, wake_len=6.0, boil=0.3, impact=0.3),
+    "tail_slap":     dict(contact=0.7, wake=0.1, wake_len=4.0, boil=0.5, impact=1.0),
+    "peduncle_throw": dict(contact=0.75, wake=0.2, wake_len=6.0, boil=0.6, impact=0.9),
 }
 
 
@@ -82,6 +90,13 @@ def spec(shot: dict, world_cm: np.ndarray, waves: list[dict], t: float, rng: np.
     heading = [math.cos(yaw), math.sin(yaw)]                             # the snout's direction on the surface
     out = {"category": cat, "amount": round(amount, 3), "heading": [round(h, 4) for h in heading], "seed": int(rng.integers(1 << 31)),
            "contact_points": int(contact.sum()), "wave_time_s": float(t), **{k: round(v * amount, 3) if k != "wake_len" else v for k, v in base.items()}}
+    if cfg.get("churn_scale") is not None:
+        out["churn_scale"] = float(cfg["churn_scale"])          # run06 realism: a fainter aerated cloud (no cyan glow)
+    if cfg.get("foam_opacity") is not None:
+        out["foam_opacity"] = float(cfg["foam_opacity"])        # run06 realism round 2: thin lace, not white flakes (wf_shot)
+    if cfg.get("contact_boost") is not None:
+        for k in ("contact", "wake"):
+            out[k] = round(out[k] * float(cfg["contact_boost"]), 3)   # run06 realism: back wash and wake are the common white water
     if contact.sum() < 20:
         out["contact"] = 0.0; out["wake"] = 0.0; out["boil"] = 0.0           # body clear of the water (mid-breach) or well under it
         if shot.get("splash") and out["impact"] > 0:
@@ -140,7 +155,7 @@ def build(spec: dict, world_cm: np.ndarray, waves: list[dict], splash: dict | No
     pattern = 0.15 + 0.85 * (0.45 * n1 + 0.25 * n2 + 0.3 * streak)
     foam = np.clip(foam * pattern * 1.8, 0, 1)
     foam = np.clip((foam - 0.15) / 0.45, 0, 1) ** 1.2                     # soft threshold: real holes between patches
-    churn = np.clip(churn * (0.4 + 0.6 * n1) * 0.9, 0, 1)
+    churn = np.clip(churn * (0.4 + 0.6 * n1) * 0.9 * float(spec.get("churn_scale", 1.0)), 0, 1)   # churn_scale: run06 realism
     keep = (foam > 0.02) | (churn > 0.04)
     # vertices on the wave surface (the rendered mesh follows the same displacement). The froth has
     # thickness: a lumpy layer up to ~10 cm where the foam is dense, so at a grazing angle it reads as

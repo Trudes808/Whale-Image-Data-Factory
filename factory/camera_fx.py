@@ -43,6 +43,13 @@ def apply(image: np.ndarray, seed: int, cfg: dict | None = None) -> tuple[np.nda
         ys, xs = np.mgrid[0:H, 0:W].astype(np.float32)
         r2 = ((xs - (W - 1) / 2) / (W / 2)) ** 2 + ((ys - (H - 1) / 2) / (H / 2)) ** 2
         img = img * (1.0 - vig * np.clip(r2, 0, 1.5) ** 1.2)[..., None]
+    # veiling glare (run06 realism, config "flare": [lo, hi]): lens flare and haze lift the blacks toward the scene's mean
+    # colour, as in long-lens field photos (their darkest percentile sits near L* 22, a render's near 0)
+    if c.get("flare"):
+        flare = float(rng.uniform(*c["flare"])); params["flare"] = round(flare, 4)
+        lin_f = np.clip(img, 0, 1) ** 2.2
+        lin_f = lin_f + flare * lin_f.reshape(-1, 3).mean(0)[None, None, :]      # additive: highlights still clip, as in a photo
+        img = lin_f ** (1 / 2.2)
     # sensor noise: shot noise grows with brightness, plus read noise; a little stronger in blue
     sigma = float(rng.uniform(*c["noise_sigma"])); params["noise_sigma"] = round(sigma, 4)
     lin = np.clip(img, 0, 1) ** 2.2

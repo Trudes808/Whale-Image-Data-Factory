@@ -78,6 +78,8 @@ TOP_DEBUG_SEQUENCE = f"{SEQUENCE_DIR}/LS_TopDebug"
 LABEL_DIR = "/Game/WhaleFactory/Labels"
 SPRAY_DIR = wf_shot.SPRAY_DIR
 LABEL_MATERIAL = f"{LABEL_DIR}/M_WhaleVisibleMask"
+# run06: the instance label pass (a separate asset; M_WhaleVisibleMask and the MRQ_Batch* configs stay as they are)
+INSTANCE_LABEL_MATERIAL = f"{LABEL_DIR}/M_WhaleInstanceMask"
 # Depth-only variant used with the opaque ocean (see make_ocean_opaque_instance).
 LABEL_DEPTH_MATERIAL = f"{LABEL_DIR}/M_WhaleVisibleMaskDepth"
 
@@ -323,9 +325,76 @@ for (int i = Steps; i >= 0; i--)  // whale point first, then back toward the cam
 return Who;
 """
 
+# run06: the instance label pass (M_WhaleInstanceMask, MRQ_BatchInst*): one exact colour code per whale instance
+INSTANCE_LABEL_SHADER = r"""
+// Which whale? (custom stencil written only by the whales: 1 the shot's whale, 3 the run04/05 companion = instance 2,
+// ANIMAL_STENCIL_BASE + k a run06 scene's instance k). The output is the instance's colour code, every channel exactly
+// 0 or 1 (factory.postprocess.ID_CODES): the supersampled label pass blends ids at silhouettes, and with these codes
+// a blend never equals another id, so the decoder takes the exact values and resolves blends by weight.
+float S = Stencil.r;
+float Id = 0.0;
+if (abs(S - WHALE_STENCIL) < 0.5) Id = 1.0;
+else if (abs(S - COMPANION_STENCIL) < 0.5) Id = 2.0;
+else if (S > ANIMAL_STENCIL_BASE + 1.5 && S < ANIMAL_STENCIL_BASE + 7.5) Id = floor(S - ANIMAL_STENCIL_BASE + 0.5);
+else return float3(0.0, 0.0, 0.0);
+float3 Code = float3(1.0, 1.0, 1.0);
+if (Id > 1.5 && Id < 2.5) Code = float3(1.0, 0.0, 0.0);
+else if (Id > 2.5 && Id < 3.5) Code = float3(0.0, 1.0, 0.0);
+else if (Id > 3.5 && Id < 4.5) Code = float3(0.0, 0.0, 1.0);
+else if (Id > 4.5 && Id < 5.5) Code = float3(1.0, 1.0, 0.0);
+else if (Id > 5.5 && Id < 6.5) Code = float3(1.0, 0.0, 1.0);
+else if (Id > 6.5) Code = float3(0.0, 1.0, 1.0);
+// Something opaque (boat, island, ...) in front of the whale?
+if (CDepth.r > SDepth.r * 1.0005 + 1.0) return float3(0.0, 0.0, 0.0);
 
-def make_label_material(path: str = LABEL_MATERIAL, analytic_waves: bool = True, shader: str | None = None) -> unreal.Material:
-    """Post-process material: 1 where the whale is directly visible, else 0.
+#if !ANALYTIC_WAVES
+return Code;  // the ocean is opaque in this pass, so the SceneDepth test above covered it
+#endif
+// The water surface is not in SceneDepth here, so test it analytically: rebuild the whale
+// point from custom depth and march the camera ray, comparing against the exact Gerstner
+// surface the water renders (same waves, same time). Any sample under water -> hidden.
+float3 Dir = normalize(-CamVec);
+float RayLength = CDepth.r / max(dot(Dir, ResolvedView.ViewForward), 1e-4);
+
+FWaterBodyData Body = GetWaterBodyData(BODY_INDEX);
+float MaxAmplitude = 0;
+for (int w = 0; w < Body.NumWaves; w++) MaxAmplitude += GetWaveDataNew(w, Body).Amplitude;
+float Ceiling = BASE_Z + MaxAmplitude + 1.0;
+
+// Only the part of the ray inside the wave band can be under water, so spend the samples
+// there: from the whale point back toward the camera until the ray rises above Ceiling.
+const int Steps = 128;
+float3 P = CamPos + Dir * RayLength;
+float fBand = 1.0;
+if (CamPos.z > Ceiling && CamPos.z > P.z)
+    fBand = saturate((Ceiling - P.z) / (CamPos.z - P.z));   // fraction of the ray (from P) below Ceiling
+float tStart = RayLength * (1.0 - fBand);
+for (int i = Steps; i >= 0; i--)  // whale point first, then back toward the camera
+{
+    float3 S3 = CamPos + Dir * (tStart + (RayLength - tStart) * i / Steps);
+    if (S3.z > Ceiling) break;
+    // Height at S3.xy: invert the horizontal Gerstner displacement by fixed-point iteration.
+    // Each wave's displacement derivative equals its steepness, so this converges only when
+    // the summed steepness is below 1 (factory/seastate.py keeps it at 0.6 or less; above 1
+    // the surface folds and the height is not even single-valued).
+    float2 Q = S3.xy;
+    WaveOutput Wave = (WaveOutput)0;
+    for (int k = 0; k < 12; k++)
+    {
+        Wave = GetAllGerstnerWavesNew(BODY_INDEX, WaterTime, DFPromote(Q));
+        Q = S3.xy - Wave.WPO.xy;
+    }
+    Wave = GetAllGerstnerWavesNew(BODY_INDEX, WaterTime, DFPromote(Q));
+    if (S3.z < BASE_Z + Wave.WPO.z - 0.1) return float3(0.0, 0.0, 0.0);
+}
+return Code;
+"""
+
+
+def make_label_material(path: str = LABEL_MATERIAL, analytic_waves: bool = True, shader: str | None = None,
+                        instance_codes: bool = False) -> unreal.Material:
+    """Post-process material: 1 where the whale is directly visible, else 0 (instance_codes: the instance colour code of
+    INSTANCE_LABEL_SHADER, an RGB output, for M_WhaleInstanceMask).
 
     whale_visible = stencil is whale, nothing opaque in front (CustomDepth <= SceneDepth),
     and (analytic_waves) the camera ray to the whale point never goes below the wave
@@ -365,12 +434,15 @@ def make_label_material(path: str = LABEL_MATERIAL, analytic_waves: bool = True,
     }
 
     custom = mel.create_material_expression(material, unreal.MaterialExpressionCustom, -300, 200)
-    custom.set_editor_property("output_type", unreal.CustomMaterialOutputType.CMOT_FLOAT1)
+    custom.set_editor_property("output_type", unreal.CustomMaterialOutputType.CMOT_FLOAT3 if instance_codes else unreal.CustomMaterialOutputType.CMOT_FLOAT1)
     custom.set_editor_property("description", "WhaleVisible")
     custom.set_editor_property("include_file_paths", ["/Plugin/Water/Private/GerstnerWaveFunctions.ush"])
     defines = []
-    for name, value in (("WHALE_STENCIL", f"{WHALE_STENCIL}.0"), ("COMPANION_STENCIL", f"{wf_shot.COMPANION_STENCIL}.0"), ("BODY_INDEX", str(WATER_BODY_INDEX)),
-                        ("BASE_Z", f"{WATER_SURFACE_Z:.3f}"), ("ANALYTIC_WAVES", "1" if analytic_waves else "0")):
+    define_values = (("WHALE_STENCIL", f"{WHALE_STENCIL}.0"), ("COMPANION_STENCIL", f"{wf_shot.COMPANION_STENCIL}.0"), ("BODY_INDEX", str(WATER_BODY_INDEX)),
+                     ("BASE_Z", f"{WATER_SURFACE_Z:.3f}"), ("ANALYTIC_WAVES", "1" if analytic_waves else "0"))
+    if instance_codes:
+        define_values += (("ANIMAL_STENCIL_BASE", f"{wf_shot.ANIMAL_STENCIL_BASE}.0"),)
+    for name, value in define_values:
         define = unreal.CustomDefine()
         define.set_editor_property("define_name", name)
         define.set_editor_property("define_value", value)
@@ -411,9 +483,22 @@ return tear * (0.35 + 0.65 * n) * fade * side * Opacity;
 """
 
 
-def make_spray_material(path: str, masked: bool) -> unreal.Material:
+SOFT_SPLASH_ALPHA_HLSL = r"""
+// run06 realism "soft" white water: eroded by two noise scales, thin and ragged at the sheet's ends and sides, never a
+// solid sheet (the coverage twin still hides the whale where the water is dense)
+float n1 = smoothstep(0.05, 0.95, Noise * 0.5 + 0.5);
+float n2 = smoothstep(0.15, 0.85, Noise2 * 0.5 + 0.5);
+float fade = saturate(1.0 - 0.95 * UV.y);
+float side = 1.0 - pow(abs(frac(UV.x) * 2.0 - 1.0), 2.0);
+float tear = smoothstep(0.2, 0.8, 0.55 * n1 + 0.45 * n2 + 0.55 * fade * side - 0.5);
+return tear * (0.2 + 0.8 * n2) * fade * side * Opacity;
+"""
+
+
+def make_spray_material(path: str, masked: bool, soft: bool = False) -> unreal.Material:
     """Splash mesh material. The translucent one is what the camera sees; the masked one
-    is its hidden twin that writes custom depth/stencil for the label pass."""
+    is its hidden twin that writes custom depth/stencil for the label pass. soft (run06 realism, M_SplashSoft*): a
+    shaded grey-blue water colour with little emissive, two-scale noise erosion, lower opacity."""
     name = path.rsplit("/", 1)[1]
     if unreal.EditorAssetLibrary.does_asset_exist(path):
         unreal.EditorAssetLibrary.delete_asset(path)
@@ -434,13 +519,13 @@ def make_spray_material(path: str, masked: bool) -> unreal.Material:
     mel.connect_material_expressions(world_pos, "", noise, "Position")
     opacity = mel.create_material_expression(material, unreal.MaterialExpressionScalarParameter, -900, 320)
     opacity.set_editor_property("parameter_name", "Opacity")
-    opacity.set_editor_property("default_value", 0.9)
+    opacity.set_editor_property("default_value", 0.7 if soft else 0.9)
     alpha = mel.create_material_expression(material, unreal.MaterialExpressionCustom, -500, 150)
     alpha.set_editor_property("output_type", unreal.CustomMaterialOutputType.CMOT_FLOAT1)
     alpha.set_editor_property("description", "SprayAlpha")
-    alpha.set_editor_property("code", SPLASH_ALPHA_HLSL)
+    alpha.set_editor_property("code", SOFT_SPLASH_ALPHA_HLSL if soft else SPLASH_ALPHA_HLSL)
     alpha_inputs = []
-    for item_name in ("UV", "Noise", "Opacity"):
+    for item_name in ("UV", "Noise", "Opacity") + (("Noise2",) if soft else ()):
         item = unreal.CustomInput()
         item.set_editor_property("input_name", item_name)
         alpha_inputs.append(item)
@@ -448,8 +533,26 @@ def make_spray_material(path: str, masked: bool) -> unreal.Material:
     mel.connect_material_expressions(uv, "", alpha, "UV")
     mel.connect_material_expressions(noise, "", alpha, "Noise")
     mel.connect_material_expressions(opacity, "", alpha, "Opacity")
+    if soft:
+        noise2 = mel.create_material_expression(material, unreal.MaterialExpressionNoise, -900, 450)
+        noise2.set_editor_property("scale", 0.16)
+        noise2.set_editor_property("levels", 4)
+        noise2.set_editor_property("quality", 2)
+        noise2.set_editor_property("noise_function", unreal.NoiseFunction.NOISEFUNCTION_VALUE_ALU)
+        mel.connect_material_expressions(world_pos, "", noise2, "Position")
+        mel.connect_material_expressions(noise2, "", alpha, "Noise2")
     mel.connect_material_property(alpha, "", unreal.MaterialProperty.MP_OPACITY_MASK if masked else unreal.MaterialProperty.MP_OPACITY)
-    if not masked:
+    if not masked and soft:
+        col = mel.create_material_expression(material, unreal.MaterialExpressionConstant3Vector, -500, -150)
+        col.set_editor_property("constant", unreal.LinearColor(0.62, 0.7, 0.78, 1.0))
+        mel.connect_material_property(col, "", unreal.MaterialProperty.MP_BASE_COLOR)
+        rough = mel.create_material_expression(material, unreal.MaterialExpressionConstant, -500, 0)
+        rough.set_editor_property("r", 0.3)
+        mel.connect_material_property(rough, "", unreal.MaterialProperty.MP_ROUGHNESS)
+        glow = mel.create_material_expression(material, unreal.MaterialExpressionConstant3Vector, -500, 80)
+        glow.set_editor_property("constant", unreal.LinearColor(0.05, 0.06, 0.07, 1.0))
+        mel.connect_material_property(glow, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+    elif not masked:
         white = mel.create_material_expression(material, unreal.MaterialExpressionConstant3Vector, -500, -150)
         white.set_editor_property("constant", unreal.LinearColor(0.88, 0.93, 0.97, 1.0))
         mel.connect_material_property(white, "", unreal.MaterialProperty.MP_BASE_COLOR)

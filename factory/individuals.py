@@ -63,6 +63,17 @@ class Individual:
     dorsal_sweep_cm: float = 0.0    # dorsal fin tip moved back (+) or forward (-)
     dorsal_edge_cm: float = 0.0     # dorsal fin trailing-edge wear amplitude (scallops, notches): the researchers' first cue
     dorsal_nicks: int = 0           # sharp nicks on the dorsal trailing edge
+    dorsal_hump_cm: float = 0.0     # run06: height of the broad hump the fin sits on (0 = the asset's straight ridge)
+    dorsal_chord: float = 1.0       # run06 round 6: blade chord multiplier, growing toward the tip (broad, rounded blades; 1 = asset)
+    dorsal_rake_cm: float = 0.0     # run06 round 6: tip raked back along a curve (falcate trailing edge), cm at the tip
+    dorsal_round: float = 0.0       # run06 round 6: 0..1, how much the top of the blade is flattened into a rounded / knobby tip
+    blade_template: int = -1        # run06 round 7: index of the real-fin outline template of the parametric blade (-1 none)
+    blade_H_cm: float = 45.0        # run06 round 7: the blade's height above its base line (rest frame, cm)
+    blade_nicks: int = 0            # run06 round 7: trailing-edge nicks on the blade
+    blade_thickness: float = 1.0    # run06 round 7: blade / hump thickness multiplier
+    pec_chord: float = 1.0          # run06 round 8: pectoral chord multiplier about its centre line (narrower blade; root kept)
+    pec_knobs: int = 0              # run06 round 8: extra tubercles on the pectoral leading edge
+    pec_knob_cm: float = 0.0        # run06 round 8: their height (cm)
     fluke_nicks: int = 0            # sharp nicks on the fluke trailing edge
     fluke_tip_loss_cm: float = 0.0  # a missing piece of one fluke tip (0 = intact)
     fluke_tip_loss_side: int = 1    # which tip (+1 right, -1 left)
@@ -77,6 +88,23 @@ class Individual:
     @classmethod
     def from_dict(cls, d: dict) -> "Individual":
         return cls(**d)
+
+
+def run06_variant(ind: "Individual", rng: np.random.Generator) -> "Individual":
+    """The run06 realism copy of an individual: same id, texture and body, fins drawn toward what the field photos show
+    (many low, stubby, hooked or worn fins, most on a broad hump), longer flippers."""
+    from dataclasses import replace as _replace
+    if ind.calf:
+        return _replace(ind, dorsal_height=float(rng.uniform(0.5, 1.1)), dorsal_hump_cm=float(rng.uniform(0.0, 8.0)))
+    kind = rng.choice(["stubby", "medium", "tall"], p=[0.4, 0.35, 0.25])
+    height = {"stubby": rng.uniform(0.3, 0.6), "medium": rng.uniform(0.6, 1.1), "tall": rng.uniform(1.1, 1.6)}[str(kind)]
+    hooked = rng.uniform() < 0.3
+    # the sweep shears the fin in proportion to its height: on a low fin a large sweep is a spike, not a hook
+    sweep = float(rng.uniform(20, 40) if hooked else rng.uniform(-10, 20)) * min(float(height), 1.0)
+    return _replace(ind, dorsal_height=float(height), dorsal_sweep_cm=sweep,
+                    dorsal_edge_cm=float(min(ind.dorsal_edge_cm * 1.5 + rng.uniform(0, 3), 14.0)), dorsal_nicks=int(rng.integers(0, 6)),
+                    dorsal_hump_cm=float(rng.uniform(12.0, 32.0)) if rng.uniform() < 0.8 else 0.0,
+                    pec_len=float(rng.uniform(1.0, 1.3)))
 
 
 def sample(rng: np.random.Generator, id: str, calf: bool = False) -> Individual:
@@ -129,6 +157,44 @@ def _value_noise_1d(rng: np.random.Generator, n_knots: int, t: np.ndarray) -> np
     knots = rng.uniform(-1, 1, n_knots)
     x = np.linspace(0, 1, n_knots)
     return np.interp(np.clip(t, 0, 1), x, knots)
+
+
+def _pec_planform(V: np.ndarray, w: np.ndarray, root: np.ndarray, tip: np.ndarray, chord: float, knobs: int, knob_cm: float, seed: int) -> np.ndarray:
+    """run06 round 8: one pectoral narrowed about its centre line and given extra leading-edge tubercles (see apply_rest 3f)."""
+    V = V.copy()
+    axis = tip - root; Lx = float(np.linalg.norm(axis)); axis = axis / max(Lx, 1e-6)
+    fin = w > 0.5
+    if fin.sum() < 20:
+        return V
+    rel = V - root
+    t = rel @ axis / Lx
+    P = rel[fin] - np.outer(rel[fin] @ axis, axis)
+    _, _, vt = np.linalg.svd(P - P.mean(0), full_matrices=False)
+    cdir = vt[0] - (vt[0] @ axis) * axis; cdir = cdir / max(np.linalg.norm(cdir), 1e-6)
+    if cdir[0] < 0:                                  # +x = toward the head: the leading edge
+        cdir = -cdir
+    c = rel @ cdir
+    bins = np.linspace(-0.05, 1.3, 55)
+    cc = np.full(len(bins), np.nan); hw = np.full(len(bins), np.nan)
+    for i, b in enumerate(bins):
+        s = fin & (np.abs(t - b) < 0.04)
+        if s.sum() > 5:
+            cc[i] = 0.5 * (c[s].max() + c[s].min()); hw[i] = 0.5 * (c[s].max() - c[s].min())
+    ok = ~np.isnan(cc)
+    if ok.sum() < 3:
+        return V
+    c0 = np.interp(t, bins[ok], cc[ok]); h0 = np.interp(t, bins[ok], hw[ok])
+    ramp = _smooth(t, 0.12, 0.35) * w
+    dc = (c - c0) * (chord - 1.0) * ramp
+    if knobs:
+        rng = np.random.default_rng(seed)
+        t_end = float(np.percentile(t[fin], 99))
+        bump = np.zeros_like(t)
+        for tc in np.sort(rng.uniform(0.18, 0.92, int(knobs))) * t_end:
+            bump += np.exp(-((t - tc) / (0.022 * t_end)) ** 2) * (1.0 - 0.5 * tc / t_end) * rng.uniform(0.7, 1.2)
+        front = np.clip((c - c0) / np.maximum(h0, 1.0), 0.0, 1.0) ** 3
+        dc = dc + knob_cm * bump * front * w
+    return V + np.outer(dc, cdir)
 
 
 def apply_rest(V: np.ndarray, ind: Individual, joints: dict, regions: dict) -> np.ndarray:
@@ -201,7 +267,8 @@ def apply_rest(V: np.ndarray, ind: Individual, joints: dict, regions: dict) -> n
                 V[:, 2] = z + (ind.dorsal_height - 1.0) * np.clip(h, 0, None) * wd
                 V[:, 0] = x - ind.dorsal_sweep_cm * wd * np.clip(h, 0, None) / hmax
                 x, z = V[:, 0], V[:, 2]
-    elif "dorsal_w" in regions and (abs(ind.dorsal_height - 1.0) > 1e-6 or abs(ind.dorsal_sweep_cm) > 1e-6 or ind.dorsal_edge_cm > 0 or ind.dorsal_nicks > 0):
+    elif "dorsal_w" in regions and (abs(ind.dorsal_height - 1.0) > 1e-6 or abs(ind.dorsal_sweep_cm) > 1e-6 or ind.dorsal_edge_cm > 0 or ind.dorsal_nicks > 0
+                                    or abs(getattr(ind, "dorsal_chord", 1.0) - 1.0) > 1e-6 or getattr(ind, "dorsal_rake_cm", 0.0) or getattr(ind, "dorsal_round", 0.0)):
         wd = regions["dorsal_w"]; tip_i, back_i, front_i = regions["dorsal_idx"]
         scale = float(np.linalg.norm(V[front_i] - V[back_i])) / max(float(regions["dorsal_chord"]), 1e-6)
         hc = regions["dorsal_h"] * scale                                      # height above the base, rest-frame cm
@@ -210,6 +277,27 @@ def apply_rest(V: np.ndarray, ind: Individual, joints: dict, regions: dict) -> n
         along = V[front_i] - V[back_i]; along = along / max(np.linalg.norm(along), 1e-6)
         V += np.outer((ind.dorsal_height - 1.0) * hc * wd, up)
         V -= np.outer(ind.dorsal_sweep_cm * wd * hc / hmax, along)
+        chord, rake, rnd = getattr(ind, "dorsal_chord", 1.0), getattr(ind, "dorsal_rake_cm", 0.0), getattr(ind, "dorsal_round", 0.0)
+        if abs(chord - 1.0) > 1e-6 or rake or rnd:
+            # run06 round 6: the blade's outline. hz = height fraction (0 base, 1 tip) on the edited fin. The chord widens
+            # about the blade's centre line by up to `chord` at the top (a broad blade instead of a spike), the top is raked
+            # back along a curve (falcate trailing edge, tip over the rear), and the upper part is flattened (rounded / knobby tip)
+            hz = np.clip(hc / hmax, 0.0, 1.0)
+            fin = wd > 0.2
+            s_al = (V - V[back_i]) @ along
+            bins = np.linspace(0, 1, 9)
+            cen = [np.median(s_al[fin & (np.abs(hz - t) < 0.08)]) if (fin & (np.abs(hz - t) < 0.08)).any() else np.median(s_al[fin]) for t in bins]
+            sc = np.interp(hz, bins, cen)
+            widen = 1.0 + (chord - 1.0) * np.sqrt(hz) * (1.0 - 0.92 * hz ** 2.5)        # broadest at mid height, tapering to a narrower tip
+            # only the blade's own skin widens: weight by membership squared and fade out beyond the blade's own chord
+            # (hump / back vertices far from the centre line would otherwise be thrown out as spikes)
+            half = np.interp(hz, bins, [np.percentile(np.abs(s_al - sc)[fin & (np.abs(hz - t) < 0.08)], 90)
+                                         if (fin & (np.abs(hz - t) < 0.08)).any() else 5.0 for t in bins])
+            keep = np.clip(1.5 - np.abs(s_al - sc) / np.maximum(half, 1.0), 0.0, 1.0) * wd ** 2
+            V += np.outer((s_al - sc) * (widen - 1.0) * keep, along)
+            V -= np.outer(rake * hz ** 2 * wd, along)                                  # back = - along
+            hcur = hc * ind.dorsal_height
+            V -= np.outer(rnd * 0.45 * hcur * _smooth(hz, 0.55, 1.0) ** 1.5 * wd, up)
         # trailing-edge wear: vertices on the fin's rear side (behind the fin's centre at that height) move forward by a
         # height-indexed scallop profile plus sharp nicks, like the fluke's edge
         if (ind.dorsal_edge_cm > 0 or ind.dorsal_nicks > 0) and (wd > 0.2).any():
@@ -224,6 +312,88 @@ def apply_rest(V: np.ndarray, ind: Individual, joints: dict, regions: dict) -> n
                 hcn = float(rng_d.uniform(0.2, 0.95)); wn = float(rng_d.uniform(0.03, 0.08)); dp = float(rng_d.uniform(3, 9))
                 nick_d += dp * np.exp(-((hz - hcn) / wn) ** 2)
             V += np.outer(rear * (np.clip(scallop, -ind.dorsal_edge_cm, ind.dorsal_edge_cm) + nick_d), along)
+        x, y, z = V[:, 0], V[:, 1], V[:, 2]
+    # 3c. run06: the hump under and ahead of the fin (real fins sit on a broad hump; the asset's ridge runs straight on).
+    # It rises from just behind the back base, carries the fin, and flattens into the back at the front base (the
+    # researcher's dorsal_fin_front), within about one fin-region length either side of the midline.
+    if getattr(ind, "dorsal_hump_cm", 0.0) > 0 and "dorsal_idx" in regions and "dorsal_front_base" in regions:
+        tip_i, back_i, front_i = regions["dorsal_idx"]
+        fb = regions["dorsal_front_base"]
+        p_fb = V[fb].mean(0) if isinstance(fb, (list, tuple)) else V[fb]
+        scale = float(np.linalg.norm(V[front_i] - V[back_i])) / max(float(regions["dorsal_chord"]), 1e-6)
+        along = p_fb - V[back_i]; L = max(float(np.linalg.norm(along)), 1.0); along = along / L
+        up = V[tip_i] - V[back_i]; up = up - (up @ along) * along; up = up / max(np.linalg.norm(up), 1e-6)
+        side = np.cross(along, up)
+        rel = V - V[back_i]
+        s_al, h_up, lat = rel @ along / L, rel @ up / L, rel @ side / L
+        prof = _smooth(s_al, -0.45, 0.0) * (1.0 - _smooth(s_al, 0.45, 1.05))            # rises behind the back base, gone at the front base
+        lat_w = np.clip(np.cos(np.clip(np.abs(lat) / 1.0, 0, 1) * np.pi / 2), 0, None) ** 2
+        top_w = _smooth(h_up, -1.4, -0.4)                                               # the top of the back only
+        V = V + np.outer(ind.dorsal_hump_cm * scale * prof * lat_w * top_w, up)
+        x, y, z = V[:, 0], V[:, 1], V[:, 2]
+    # 3d. run06 round 7 (parametric blade only, WhaleModel.enable_blade): the asset's own blade and any wear on it are
+    # pressed down onto a smooth back (a quadratic fit to the back around it), so nothing of it shows beside the new blade
+    if regions.get("dorsal_flatten") and "dorsal_idx" in regions:
+        wd = np.asarray(regions["dorsal_w"]); tip_i, back_i, front_i = regions["dorsal_idx"]
+        c0 = (V[back_i] + V[front_i]) / 2.0
+        up = V[tip_i] - c0; up = up / max(np.linalg.norm(up), 1e-6)
+        along = V[front_i] - V[back_i]; along = along - (along @ up) * up; along = along / max(np.linalg.norm(along), 1e-6)
+        side = np.cross(along, up)
+        rel = V - c0; s_, h_, l_ = rel @ along, rel @ up, rel @ side
+        X = np.stack([np.ones(len(V)), s_, l_, s_ ** 2, l_ ** 2, s_ * l_], 1)
+        near = (np.abs(s_) < 150.0) & (np.abs(l_) < 45.0) & (h_ > -40.0) & (wd < 0.02)
+        if near.sum() > 20:
+            coef = np.linalg.lstsq(X[near], h_[near], rcond=None)[0]
+            excess = np.clip(h_ - X @ coef, 0.0, None)
+            # (round 8: WhaleModel.enable_blade also removes the old blade's faces and closes the hole with a fan, so only
+            # the ring around it and the fan's centre are used; projecting them onto the fitted back leaves no crater)
+            V = V - np.outer(excess * np.clip(wd * 4.0, 0.0, 1.0), up)
+            x, y, z = V[:, 0], V[:, 1], V[:, 2]
+    # 3e. run06 round 8: the knobs along the ridge between the fin and the flukes, toned down to subtle knuckles. The
+    # rest pose is curled, so heights are taken across the spine polyline (joints 55..60) in the x-z plane: per 4 cm of
+    # arc length the ridge top (|y| < 12 cm), a robust smooth line through it, and the part of each bump above that line
+    # scaled by (1 - ridge_soften) on the vertices near the top.
+    if regions.get("ridge_soften") and "dorsal_idx" in regions:
+        k_soft = float(regions["ridge_soften"])
+        P = np.array([joints[n] for n in SPINE[4:10]], float)[:, [0, 2]]          # joint55_04 .. joint60_09 (x, z)
+        seg = np.diff(P, axis=0); L = np.linalg.norm(seg, axis=1); cum = np.concatenate([[0.0], np.cumsum(L)])
+        Q = V[:, [0, 2]]
+        best = np.full(len(V), np.inf); s_arc = np.zeros(len(V)); h_up = np.zeros(len(V)); nrm = np.zeros((len(V), 2))
+        for j in range(len(seg)):
+            tdir = seg[j] / max(L[j], 1e-6); n = np.array([-tdir[1], tdir[0]])
+            if n[1] < 0:
+                n = -n
+            u = np.clip((Q - P[j]) @ tdir, 0.0, L[j]); foot = P[j] + np.outer(u, tdir)
+            d = np.linalg.norm(Q - foot, axis=1)
+            take = d < best
+            best[take] = d[take]; s_arc[take] = cum[j] + u[take]; h_up[take] = ((Q - foot) @ n)[take]; nrm[take] = n
+        fin_s = float(s_arc[regions["dorsal_idx"][1]])
+        s_lo, s_hi = fin_s + 15.0, cum[-1] - 20.0
+        if s_hi > s_lo + 60.0:
+            ss = np.arange(s_lo, s_hi, 4.0)
+            topm = (np.abs(y) < 12.0) & (h_up > 0)
+            ht = np.array([h_up[topm & (np.abs(s_arc - q) < 2.5)].max() if (topm & (np.abs(s_arc - q) < 2.5)).any() else np.nan for q in ss])
+            okr = ~np.isnan(ht)
+            if okr.sum() > 10:
+                sr, hr = ss[okr], ht[okr]
+                med = np.array([np.median(hr[max(0, j - 6): j + 7]) for j in range(len(hr))])
+                line = np.convolve(np.pad(med, 3, mode="edge"), np.ones(7) / 7.0, mode="valid")
+                bump = np.clip(hr - line, 0.0, None)
+                line_v = np.interp(s_arc, sr, line); bump_v = np.interp(s_arc, sr, bump)
+                inside = (s_arc > s_lo) & (s_arc < s_hi) & (np.abs(y) < 30.0)
+                fall = np.clip((h_up - (line_v - 15.0)) / 15.0, 0.0, 1.0) * np.exp(-(y / 14.0) ** 2) * inside
+                dz = k_soft * bump_v * fall
+                V[:, 0] -= dz * nrm[:, 0]; V[:, 2] -= dz * nrm[:, 1]
+                x, y, z = V[:, 0], V[:, 1], V[:, 2]
+    # 3f. run06 round 8: pectoral planform: a narrower blade (chord about the fin's own centre line, the root and the
+    # shoulder keep their width) and a few extra tubercles on the leading edge (the asset has small ones already)
+    if (abs(getattr(ind, "pec_chord", 1.0) - 1.0) > 1e-6 or getattr(ind, "pec_knobs", 0)) and regions.get("pec_left") is not None:
+        for side, root_name, tip_name, k_seed in (("pec_left", PEC_LEFT[0], PEC_LEFT[-1], 1), ("pec_right", PEC_RIGHT[0], PEC_RIGHT[-1], 2)):
+            w = regions.get(side)
+            if w is None:
+                continue
+            V = _pec_planform(V, np.asarray(w), np.array(joints[root_name], float), np.array(joints[tip_name], float),
+                              float(ind.pec_chord), int(ind.pec_knobs), float(ind.pec_knob_cm), ind.seed * 7 + k_seed)
         x, y, z = V[:, 0], V[:, 1], V[:, 2]
     # 4. pectoral length about the fin root along the fin axis
     for side, root_name, tip_name in (("pec_left", PEC_LEFT[0], PEC_LEFT[-1]), ("pec_right", PEC_RIGHT[0], PEC_RIGHT[-1])):

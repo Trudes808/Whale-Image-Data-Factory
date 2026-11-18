@@ -42,6 +42,57 @@ SEA_STATES = {
 }
 
 
+# ---- run06 additions (trade-wind sea states, the bake's cascades, calibration targets) ----------------------
+# The bake (factory/oceanbake.py) uses cascades with integer ratios of 5 so that cascades 1-3 are all periodic on the
+# 211.3 m tile of cascade 1 (the whitecap map is simulated on that tile from their exact spectra), and every
+# cascade's band ends at |n| = 30 of its own grid (as web-ocean's 5.2 ratio does).
+BAKE_CASCADES = [1056.5, 211.3, 42.26, 8.452, 1.6904, 0.33808]
+
+# Trade-wind mornings, calm to moderate (Beaufort 2-4), as surveyed from small boats. U10 in m/s, fetch in km,
+# a long-crested swell from another direction; direction is drawn per batch (factory.oceanbake.draw_state).
+TRADE_STATES = {
+    "tw_calm":     dict(wind=3.0, fetch_km=30.0, swell_hs=0.6, swell_len=130.0, choppy=1.0),
+    "tw_light":    dict(wind=5.0, fetch_km=60.0, swell_hs=0.8, swell_len=150.0, choppy=1.1),
+    "tw_breeze":   dict(wind=7.0, fetch_km=120.0, swell_hs=1.0, swell_len=160.0, choppy=1.15),
+    "tw_moderate": dict(wind=9.0, fetch_km=200.0, swell_hs=1.2, swell_len=170.0, choppy=1.2),
+    "tw_fresh":    dict(wind=11.0, fetch_km=300.0, swell_hs=1.4, swell_len=180.0, choppy=1.25),   # channel trades, for comparison
+}
+
+
+def cox_munk_mss(wind: float) -> dict:
+    """Cox & Munk (1954) clean-surface slope variances: total 0.003 + 5.12e-3 U, upwind 3.16e-3 U, crosswind
+    0.003 + 1.92e-3 U (U = wind at 10 m, m/s)."""
+    return {"total": 0.003 + 0.00512 * wind, "upwind": 0.00316 * wind, "crosswind": 0.003 + 0.00192 * wind}
+
+
+def whitecap_fraction(wind: float) -> float:
+    """Monahan & O'Muircheartaigh (1980): W = 3.84e-6 U^3.41 (fraction of the area)."""
+    return 3.84e-6 * wind ** 3.41
+
+
+def friction_velocity(wind: float) -> float:
+    cd = (0.8 + 0.065 * wind) * 1e-3          # Wu (1982) drag coefficient
+    return wind * math.sqrt(cd)
+
+
+def elfouhaily_short(k, phi, wind: float, kp: float = 0.0):
+    """2D wavenumber spectrum of the short-wave (gravity-capillary) part of Elfouhaily et al. (1997):
+    Psi = k^-4 / (2 pi) * B_h(k) * (1 + Delta(k) cos 2 phi), B_h = alpha_m / 2 * c_m / c * exp(-(k/k_m - 1)^2 / 4),
+    with the paper's spreading Delta(k) and its low-wavenumber cut-off L_PM = exp(-5/4 (k_p / k)^2) (k_p = peak
+    wavenumber of the wind sea); phi = direction relative to the wind."""
+    k = np.maximum(k, 1e-6)
+    km, cm = 370.0, 0.23
+    us = friction_velocity(wind)
+    alpha_m = 0.01 * (1.0 + math.log(us / cm)) if us < cm else 0.01 * (1.0 + 3.0 * math.log(us / cm))
+    c = omega_of(k) / k
+    Bh = 0.5 * alpha_m * (cm / c) * np.exp(-0.25 * (k / km - 1.0) ** 2)
+    if kp > 0.0:
+        Bh = Bh * np.exp(-1.25 * (kp / k) ** 2)
+    a0 = math.log(2.0) / 4.0; am = 0.13 * us / cm
+    delta = np.tanh(a0 + am * (cm / c) ** 2.5)          # the long-wave term a_p (c / c_p)^2.5 is ~0 at these k
+    return k ** -4 / (2.0 * math.pi) * Bh * (1.0 + delta * np.cos(2.0 * phi))
+
+
 def omega_of(k: np.ndarray) -> np.ndarray:
     return np.sqrt(GRAV * k + SURF * k ** 3)
 
@@ -90,6 +141,9 @@ class FFTOcean:
     n: int = 512
     cascades: list = field(default_factory=lambda: list(CASCADES))
     fine_gain: tuple = (1.0, 1.0, 1.0, 1.0, 0.85, 0.6)
+    cap_scale: float = 0.0        # gain on the Elfouhaily short-wave (gravity-capillary) curvature term; 0 = off (web-ocean)
+    short_spread_mix: float = 0.0  # share of isotropic spreading blended into the wind sea for short waves (0 = off)
+    short_spread_lmax_m: float = 1.5  # ... waves shorter than this wavelength (blend ramps in over a factor 2 in k)
     _h0: list = field(default_factory=list, repr=False)
     _k: list = field(default_factory=list, repr=False)
 
@@ -109,7 +163,13 @@ class FFTOcean:
         if U > 0.1:
             alpha = 0.076 * (U * U / (F * GRAV)) ** 0.22
             wp = 22.0 * (GRAV * GRAV / (U * F)) ** (1.0 / 3.0)
-            S = jonswap(w, wp, alpha, self.gamma) * donelan_banner(wrap_angle(theta - math.radians(self.wind_dir_deg)), w, wp)
+            D = donelan_banner(wrap_angle(theta - math.radians(self.wind_dir_deg)), w, wp)
+            if self.short_spread_mix > 0.0:
+                # short-crested chop: blend towards isotropic for k above 2 pi / short_spread_lmax_m
+                t = np.clip(np.log(np.maximum(kl, 1e-9) / (2 * math.pi / self.short_spread_lmax_m)) / math.log(2.0), 0.0, 1.0)
+                m = self.short_spread_mix * t * t * (3 - 2 * t)
+                D = (1 - m) * D + m / (2 * math.pi)
+            S = jonswap(w, wp, alpha, self.gamma) * D
         if self.swell_hs > 1e-3:
             ks = 2.0 * math.pi / self.swell_len
             ws = math.sqrt(GRAV * ks)
@@ -119,7 +179,11 @@ class FFTOcean:
             S = S + jonswap(w, ws, alpha_s, gs) * cos_spread(wrap_angle(theta - math.radians(self.swell_dir_deg)), self.swell_spread)
         sc = self.short_cut_m
         S = S * np.exp(-kl * kl * sc * sc)
-        return S * d_omega_of(kl) / np.maximum(kl, 1e-9)
+        out = S * d_omega_of(kl) / np.maximum(kl, 1e-9)
+        if self.cap_scale > 0.0 and U > 0.1:
+            kp = (22.0 * (GRAV * GRAV / (U * F)) ** (1.0 / 3.0)) ** 2 / GRAV
+            out = out + self.cap_scale * elfouhaily_short(kl, theta - math.radians(self.wind_dir_deg), U, kp) * np.exp(-kl * kl * sc * sc)
+        return out
 
     def _band(self, c: int) -> tuple[float, float]:
         L = self.cascades

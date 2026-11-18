@@ -67,10 +67,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seed", type=int, default=1)
     args = parser.parse_args(argv)
     rows = load_manifest(args.run_dir)
+    rejected = [r["id"] for r in rows if r.get("rejected")]          # run06 realism quality gate (factory.postprocess)
+    rows = [r for r in rows if not r.get("rejected")]
     splits = split(rows, args.val_fraction, args.seed)
     (args.run_dir / "dataset" / "splits.json").write_text(json.dumps(splits, indent=1))
     report = summary(rows)
     report["train"], report["val"] = len(splits["train"]), len(splits["val"])
+    if rejected:
+        report["rejected_by_quality_gate"] = len(rejected)
     (args.run_dir / "dataset" / "summary.json").write_text(json.dumps(report, indent=1))
     print(json.dumps(report, indent=1))
     return 0

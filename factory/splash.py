@@ -24,7 +24,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-KINDS = ("crown", "wash")
+KINDS = ("crown", "wash", "blow", "spray", "streams")      # blow / spray: run06 realism (factory.realism)
 GRAVITY_CM_S2 = 981.0
 
 
@@ -169,6 +169,34 @@ def plumes(rng: np.random.Generator, centre: np.ndarray, radius_cm: float, heigh
 
 
 def build_mesh(spec: dict) -> Mesh:
+    if spec.get("style") == "soft":
+        return _soft(spec)
+    return _build_mesh(spec)
+
+
+def _soft(spec: dict) -> Mesh:
+    """run06 realism: the same white water with droplets of varied size, stretched along their flight (motion blur),
+    and finer sheets."""
+    global droplets
+    plain = droplets
+
+    def varied(rng, centre, radius_cm, height_cm, count, elevation_deg=(45.0, 85.0), size_cm=(2.5, 10.0), ring=(0.4, 1.0),
+               spread_deg=30.0, age=(0.15, 1.0), v_uv=0.1):
+        parts = []
+        for k in range(3):                                  # three size classes: mist, drops, gobs
+            lo, hi = [(0.6, 2.0), (2.0, 6.0), (6.0, 16.0)][k]
+            parts.append(plain(rng, centre, radius_cm, height_cm, max(1, int(count * (0.55, 0.35, 0.1)[k] * 1.5)), elevation_deg,
+                               (lo, hi), ring, spread_deg, age, v_uv))
+        m = Mesh.concat(parts)
+        return m
+    droplets = varied
+    try:
+        return _build_mesh(spec)
+    finally:
+        droplets = plain
+
+
+def _build_mesh(spec: dict) -> Mesh:
     kind = spec["kind"]
     if kind not in KINDS:
         raise ValueError(f"unknown splash kind {kind!r}; choose from {KINDS}")
@@ -185,6 +213,65 @@ def build_mesh(spec: dict) -> Mesh:
             offset = np.array([rng.uniform(-0.5, 0.5) * radius, rng.uniform(-0.5, 0.5) * radius, 0.0])
             parts.append(foam_disc(rng, centre + offset, 0.0, radius * rng.uniform(0.5, 1.2)))
         return Mesh.concat(parts)
+    if kind == "blow":
+        # the breath: a bushy column of mist from the blowhole, droplets thinning out toward the top, drifting downwind
+        parts = []
+        drift = np.asarray(spec.get("drift_cm", [0.0, 0.0]), float)
+        for k in range(int(rng.integers(5, 9))):
+            h = height * rng.uniform(0.5, 1.05)
+            v_z = math.sqrt(2 * GRAVITY_CM_S2 * max(h, 5.0))
+            parts.append(plume(rng, centre, rng.uniform(0, 360), rng.uniform(40, 120), radius * rng.uniform(0.3, 1.0),
+                               v_z * rng.uniform(0.05, 0.18), v_z, n_cols=int(rng.integers(5, 9)), n_rows=16, jitter_cm=0.25 * radius))
+        parts.append(droplets(rng, centre, radius, height, count=int(160 * amount), elevation_deg=(70.0, 89.0), size_cm=(1.5, 6.0),
+                              ring=(0.0, 1.0), spread_deg=60.0, age=(0.2, 0.75)))
+        mesh = Mesh.concat(parts)
+        z = np.clip((mesh.vertices[:, 2] - centre[2]) / max(height, 1.0), 0.0, 1.5)
+        mesh.vertices[:, :2] += z[:, None] * drift[None, :]               # wind leans the column
+        return mesh
+    if kind == "streams":
+        # water pouring off a raised fluke's trailing edge: from each edge point (spec points_rel_cm, relative to the centre)
+        # a thin crossed ribbon falls to the water (centre z = the local water level), wavering, thinning and breaking into
+        # drops; v runs 0 at the edge -> 1 at the bottom, so the material's fade makes the stream thin out as it falls
+        if spec.get("strands"):
+            return _strands(rng, spec, centre)
+        parts = []
+        water_z = centre[2]
+        w0, w1 = spec.get("width_cm", [2.0, 7.0])
+        keep = float(spec.get("keep_fraction", 0.75))
+        f0, f1 = spec.get("fall_fraction", [1.0, 1.0])
+        for rel in spec.get("points_rel_cm", []):
+            top = centre + np.asarray(rel, float)
+            fall = (top[2] - water_z) * float(rng.uniform(f0, f1))            # a stream may break up before the water
+            if fall < 5.0 or rng.uniform() > keep:
+                continue
+            width = float(rng.uniform(w0, w1)); n = 10
+            lean = rng.normal(0, 0.08, size=2) * fall
+            for ang in (0.0, math.pi / 2):
+                dx, dy = math.cos(ang) * width / 2, math.sin(ang) * width / 2
+                verts, uvs = [], []
+                for i in range(n):
+                    f = i / (n - 1)
+                    wob = rng.normal(0, 1.5 + 4.0 * f, size=2)
+                    c = top + np.array([lean[0] * f * f + wob[0], lean[1] * f * f + wob[1], -fall * f])
+                    w = 1.0 - 0.6 * f
+                    verts += [c + np.array([-dx * w, -dy * w, 0.0]), c + np.array([dx * w, dy * w, 0.0])]
+                    uvs += [[0.05, f], [0.95, f]]
+                parts.append(Mesh(np.asarray(verts), _sheet_faces(2, n), np.asarray(uvs)))
+            parts.append(droplets(rng, np.array([top[0], top[1], water_z]), 15.0, max(fall, 10.0), count=4, elevation_deg=(80.0, 90.0),
+                                  size_cm=(1.5, 4.0), ring=(0.0, 0.5), spread_deg=20.0, age=(0.55, 0.95)))
+        return Mesh.concat(parts)
+    if kind == "spray":
+        # a curtain of water thrown toward one side (azimuth_deg, e.g. toward the camera): it stands in front of the body
+        az = float(spec.get("azimuth_deg", rng.uniform(0, 360)))
+        parts = []
+        for _ in range(max(3, int(round(rng.integers(5, 10) * amount)))):
+            h = height * rng.uniform(0.4, 1.2)
+            v_z = math.sqrt(2 * GRAVITY_CM_S2 * max(h, 5.0))
+            parts.append(plume(rng, centre, az + rng.normal(0, 35), rng.uniform(30, 90), radius * rng.uniform(0.2, 0.8),
+                               v_z * rng.uniform(0.2, 0.7), v_z, n_cols=int(rng.integers(7, 12)), jitter_cm=0.06 * radius))
+        parts.append(droplets(rng, centre, radius, height * 1.1, count=int(70 * amount), size_cm=(2.0, 8.0)))
+        parts.append(foam_disc(rng, centre, 0.0, radius * rng.uniform(0.6, 1.1)))
+        return Mesh.concat(parts)
     # wash: white water along the waterline, a few low plumes, low droplets
     parts = []
     for _ in range(int(rng.integers(3, 6))):
@@ -193,6 +280,64 @@ def build_mesh(spec: dict) -> Mesh:
     parts += plumes(rng, centre, radius * 0.7, max(height, 40.0), max(2, int(round(4 * amount))), height_range=(0.4, 1.0))
     parts.append(droplets(rng, centre, radius, max(height, 40.0), count=int(40 * amount),
                           elevation_deg=(30.0, 70.0), size_cm=(2.0, 7.0)))
+    return Mesh.concat(parts)
+
+
+def _strands(rng: np.random.Generator, spec: dict, centre: np.ndarray) -> Mesh:
+    """run06 realism round 2 (spec "strands"): water sheeting off a raised fluke as the field photos show it: many thin
+    strands spaced along the whole trailing edge (the edge points are joined into a polyline), each a narrow crossed
+    ribbon for its first part that then breaks into a train of falling drops, spaced wider as they fall. strands =
+    {"spacing_cm": [a, b], "width_cm": [a, b], "break_fraction": [a, b], "keep": p}."""
+    st = spec["strands"]
+    water_z = centre[2]
+    pts = [centre + np.asarray(r, float) for r in spec.get("points_rel_cm", [])]
+    s0, s1 = st.get("spacing_cm", [5.0, 12.0])
+    w0, w1 = st.get("width_cm", [0.4, 1.2])
+    b0, b1 = st.get("break_fraction", [0.25, 0.7])
+    keep = float(st.get("keep", 0.7))
+    # strand roots along the polyline (segments longer than 80 cm are gaps between edge pieces, not edge)
+    roots = []
+    for a, b in zip(pts[:-1], pts[1:]):
+        seg = b - a
+        L = float(np.linalg.norm(seg[:2]))
+        if L > 80.0 or L < 1e-3:
+            continue
+        t = float(rng.uniform(0, s0))
+        while t < L:
+            roots.append(a + seg * (t / L))
+            t += float(rng.uniform(s0, s1))
+    parts = []
+    for top in roots:
+        fall = top[2] - water_z
+        if fall < 8.0 or rng.uniform() > keep:
+            continue
+        width = float(rng.uniform(w0, w1))
+        brk = fall * float(rng.uniform(b0, b1))                # the ribbon part, then drops
+        n = 6
+        lean = rng.normal(0, 0.05, size=2) * fall
+        for ang in (0.0, math.pi / 2):
+            dx, dy = math.cos(ang) * width / 2, math.sin(ang) * width / 2
+            verts, uvs = [], []
+            for i in range(n):
+                f = i / (n - 1)
+                wob = rng.normal(0, 0.4 + 1.2 * f, size=2)
+                c = top + np.array([lean[0] * f * f * brk / fall + wob[0], lean[1] * f * f * brk / fall + wob[1], -brk * f])
+                w = 1.0 - 0.5 * f
+                verts += [c + np.array([-dx * w, -dy * w, 0.0]), c + np.array([dx * w, dy * w, 0.0])]
+                uvs += [[0.05, 0.3 * f], [0.95, 0.3 * f]]
+            parts.append(Mesh(np.asarray(verts), _sheet_faces(2, n), np.asarray(uvs)))
+        z = brk
+        gap = float(rng.uniform(2.0, 5.0))
+        while z < fall - 2.0:                                  # the drop train: longer gaps lower down (they accelerate)
+            f = z / fall
+            size = width * float(rng.uniform(0.6, 1.3))
+            pos = top + np.array([lean[0] * f * f + rng.normal(0, 1.0 + 2.0 * f), lean[1] * f * f + rng.normal(0, 1.0 + 2.0 * f), -z])
+            parts.append(ellipsoid(pos, np.array([0.0, 0.0, 1.0]), size * float(rng.uniform(2.0, 4.0)), size, 0.3 + 0.5 * f,
+                                   segments=6, rings=3))
+            z += gap
+            gap *= float(rng.uniform(1.15, 1.45))
+    if not parts:
+        return Mesh(np.zeros((0, 3)), np.zeros((0, 3), int), np.zeros((0, 2)))
     return Mesh.concat(parts)
 
 
@@ -208,7 +353,7 @@ def write_obj(spec: dict, path) -> dict:
     return {"vertices": int(len(mesh.vertices)), "faces": int(len(mesh.faces))}
 
 
-def splash_spec(kind: str, centre_cm, radius_cm: float, height_cm: float, seed: int = 0, amount: float = 1.0) -> dict:
+def splash_spec(kind: str, centre_cm, radius_cm: float, height_cm: float, seed: int = 0, amount: float = 1.0, **extra) -> dict:
     """The JSON-ready description used in a shot file; geometry comes from build_mesh."""
     if kind not in KINDS:
         raise ValueError(f"unknown splash kind {kind!r}; choose from {KINDS}")
@@ -219,7 +364,7 @@ def splash_spec(kind: str, centre_cm, radius_cm: float, height_cm: float, seed: 
         "height_cm": round(float(height_cm), 2),
         "seed": int(seed),
         "amount": round(float(amount), 3),
-    }
+    } | {k: v for k, v in extra.items()}
 
 
 def ensure_obj(spec: dict | None, directory, name: str) -> dict | None:

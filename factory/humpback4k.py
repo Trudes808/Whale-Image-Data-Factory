@@ -25,7 +25,9 @@ def write_obj(path: Path, groups: list[tuple[str, np.ndarray, np.ndarray, np.nda
     """groups: (name, vertices cm project frame, faces, uv). Faces wound so the outward normal matches."""
     lines = [f"# {comment}", f"mtllib {path.stem}.mtl"]
     base = 0; written = []
-    for name, v, faces, uv in groups:
+    for group in groups:
+        name, v, faces, uv = group[:4]
+        normals = group[4] if len(group) > 4 else None       # run06 round 8: optional vertex normals (project frame, outward)
         tri = v[faces]; centre = v.mean(0)
         geometric = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
         outward = np.einsum("ij,ij->i", geometric, tri.mean(1) - centre)
@@ -34,8 +36,13 @@ def write_obj(path: Path, groups: list[tuple[str, np.ndarray, np.ndarray, np.nda
         lines.append(f"usemtl {name}"); written.append(name)
         lines.extend(f"v {x:.4f} {-y:.4f} {z:.4f}" for x, y, z in v)
         lines.extend(f"vt {u:.6f} {1.0 - t:.6f}" for u, t in uv)
-        for a, b, c in faces + base + 1:
-            lines.append(f"f {a}/{a} {b}/{b} {c}/{c}")
+        if normals is not None:
+            lines.extend(f"vn {x:.5f} {-y:.5f} {z:.5f}" for x, y, z in normals)
+            for a, b, c in faces + base + 1:
+                lines.append(f"f {a}/{a}/{a} {b}/{b}/{b} {c}/{c}/{c}")
+        else:
+            for a, b, c in faces + base + 1:
+                lines.append(f"f {a}/{a} {b}/{b} {c}/{c}")
         base += len(v)
     path.write_text("\n".join(lines) + "\n")
     path.with_suffix(".mtl").write_text("".join(f"newmtl {g}\n" for g in written))

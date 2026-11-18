@@ -27,4 +27,6 @@ wf_python -m factory.diskguard check --path "$run_dir" --need-gib "$(( count * 5
 "$WF_REPO_ROOT/tools/render_batch.sh" "$run_dir"
 wf_python -m factory.postprocess "$run_dir" --workers "${WF_POSTPROCESS_WORKERS:-16}"
 wf_python -m factory.dataset "$run_dir"
+# frugal storage (config storage.raw_after_postprocess = "delete"): drop the raw frames once every shot has its dataset files
+wf_python -m factory.storage drop-raw "$run_dir" || true
 echo "[$(date -u +%FT%TZ)] build_dataset: done -> $run_dir/dataset"

@@ -93,7 +93,11 @@ def sample_camera(rng: np.random.Generator, config: dict, pose: poses.Pose, plac
     # Aim jitter: shift the view by a fraction of the frame, in angle.
     hfov = 2 * math.degrees(math.atan(SENSOR_WIDTH_MM / 2 / focal))
     rotation["yaw"] = round(rotation["yaw"] + rng.uniform(-1, 1) * cam["aim_jitter_frame_fraction"] * hfov / 2, 4)
-    rotation["pitch"] = round(rotation["pitch"] + rng.uniform(-1, 1) * cam["aim_jitter_frame_fraction"] * hfov * 9 / 16 / 2, 4)
+    if cam.get("filmback_mm"):                   # run06 realism: the vertical jitter follows the frame's own aspect
+        rotation["pitch"] = round(rotation["pitch"] + rng.uniform(-1, 1) * cam.get("aim_jitter_vertical_fraction", cam["aim_jitter_frame_fraction"])
+                                  * hfov * config["resolution"][1] / config["resolution"][0] / 2, 4)
+    else:
+        rotation["pitch"] = round(rotation["pitch"] + rng.uniform(-1, 1) * cam["aim_jitter_frame_fraction"] * hfov * 9 / 16 / 2, 4)
     rotation["roll"] = round(float(rng.uniform(-cam["roll_deg"], cam["roll_deg"])), 3)
     return {"location": location.round(2).tolist(), "rotation": rotation, "focal_mm": round(focal, 2), "bearing_deg": round(bearing, 2),
             "bearing_deg": round(bearing, 2), "distance_m": round(distance_m, 2), "height_m": round(height_m, 2),
@@ -133,7 +137,11 @@ def sample_camera_for_size(rng: np.random.Generator, config: dict, pose: poses.P
     # run03: a per-shot target for how much of the frame the *visible* whale spans (log-uniform in
     # camera.extent_target, e.g. 0.3 .. 1.6 of the frame, i.e. from a small whale to one cut by the
     # frame edges as in long-lens field photos); the lens zooms in or out towards it.
-    target = log_uniform(rng, *cam["extent_target"]) if cam.get("extent_target") else None
+    if cam.get("extent_quantiles"):              # run06 realism: the field photos' framing distribution (factory.realism)
+        from factory import realism as _rz
+        target = _rz.qsample(rng, cam["extent_quantiles"], log=True)
+    else:
+        target = log_uniform(rng, *cam["extent_target"]) if cam.get("extent_target") else None
     tries = int(cam.get("max_camera_tries", 1)) if (min_extent > 0 or min_inside > 0 or target) else 1
     best, best_score = None, -20.0
     focal_scale = 1.0
@@ -168,7 +176,11 @@ def sample_camera_for_size(rng: np.random.Generator, config: dict, pose: poses.P
 def sample_lighting(rng: np.random.Generator, config: dict, camera_yaw: float) -> tuple[dict, dict, float, bool]:
     light = config["lighting"]
     overcast = rng.uniform() < light["overcast_fraction"]
-    elevation = rng.uniform(*light["sun_elevation_deg"])
+    if light.get("sun_elevation_quantiles"):      # run06 realism: the field days' sun (factory.realism)
+        from factory import realism as _rz
+        elevation = _rz.qsample(rng, light["sun_elevation_quantiles"])
+    else:
+        elevation = rng.uniform(*light["sun_elevation_deg"])
     # Azimuth relative to the camera's view direction: 0 = sun behind the camera, 180 = backlit.
     relative = rng.uniform(0.0, 360.0)
     sun_yaw = (camera_yaw + 180.0 + relative) % 360.0  # the light's forward vector points *from* the sun
@@ -216,8 +228,8 @@ PEC_DROOP_DEG = {"pec_up": (-35.0, 5.0), "fin_tip": (-25.0, 10.0), "roll_belly":
                  "spyhop": (0.0, 20.0), "spyhop_low": (0.0, 20.0)}
 WAVE_TIME_S = 0.0                 # the frozen wave time of every render (DefaultEngine.ini r.Water.OverrideWavesTime)
 SCENE_OFFSET_CM = 15000.0         # the scene is translated by up to this (each axis) to vary the wave phase under it
-HEAD_UNDER_CATEGORIES = {"fluke_down", "fluke_up", "fluke_edge"}       # fluking dives: the head is never out of the water
-COMPANION_CATEGORIES = {"logging", "blow", "blow_sliver", "awash", "arch", "back_arch", "surface", "peduncle", "fluke_up", "fluke_down", "pec_up", "fin_tip"}
+HEAD_UNDER_CATEGORIES = {"fluke_down", "fluke_up", "fluke_edge", "fluke_rollout", "fluke_sinking"}       # fluking dives: the head is never out of the water
+COMPANION_CATEGORIES = {"logging", "blow", "blow_sliver", "awash", "arch", "back_arch", "surface", "peduncle", "tail_stock", "fluke_up", "fluke_down", "pec_up", "fin_tip"}
 CALF_CATEGORIES = {"logging": 0.3, "blow": 0.3, "awash": 0.15, "back_arch": 0.25, "surface": 0.25}
 # Procedural surface poses for the rig: a straight keyframe plus a hump along the spine (deform.DeformParams; on this
 # model arch < 0 = back up, head_pitch < 0 = snout down, tail_curl < 0 = flukes down). Ranges per category; a config
@@ -360,9 +372,35 @@ def make_shot(index: int, rng: np.random.Generator, config: dict, vertices_cm: n
     wet_cfg = body.get("wetness", {})
     wetness = float(rng.uniform(*wet_cfg.get("drying", [0.15, 0.5]))) if rng.uniform() < wet_cfg.get("drying_fraction", 0.15) else float(rng.uniform(*wet_cfg.get("wet", [0.55, 1.0])))
     roughness_scale = round(0.85 - 0.6 * wetness, 3)
+    rz_info = None
+    pec_side = None
+    if config.get("realism") and model is not None and model.kind == "humpback4k":
+        # run06 realism: the dive and the surfacing roll from one continuous phase each, and the new rig-level categories
+        from factory import realism as rz
+        rz_info = {}
+        crest = lift * seastate.crest_height_m(sea) if lift > 0 else 0.0
+        body_keys = {"individual": individual, "body_scale": scale, "pec_droop_deg": pec_droop}
+        if rz.cfg(config).get("sequences") and category in rz.DIVE_WINDOWS:
+            pose, clip_t, fluke_curl, rz_info["phase"], rz_info["top"] = rz.dive(rng, model, body_keys, category, pose, scale, crest,
+                                                                                   rollout_clearance=tuple((config.get("realism") or {}).get("rollout_clearance_m", (0.3, 0.9))))
+            params = deform.DeformParams(); procedural_bend = False
+        elif rz.cfg(config).get("sequences") and category in rz.SURF_WINDOWS:
+            pose, params, rz_info["phase"], rz_info["top_x"] = rz.surfacing(rng, category, pose, scale, crest)
+            procedural_bend = True
+            clip_t = round(float(rng.uniform(0.2, 0.45)), 3)          # a straight keyframe under the procedural roll
+        elif category in ("pec_slap", "head_rise", "tail_slap", "peduncle_throw"):
+            o = rz.posed_category(rng, category, pose, scale, crest)
+            pose, clip_t, params = o["pose"], round(float(o["clip_t"]), 3), o["params"]
+            pec_droop = round(float(o["pec_droop"]), 2) if o["pec_droop"] is not None else pec_droop
+            pec_side = [round(float(v), 2) for v in o["pec_side"]] if o["pec_side"] else None
+            procedural_bend = not params.is_identity()
+            if o.get("lateral_sign_from_roll"):
+                params = rz.choose_lateral_sign(model, {"individual": individual, "body_scale": scale, "pec_droop_deg": pec_droop, "pose": {"clip_t": clip_t}}, params, pose)
+            rz_info["top"] = o["top"]
     if model is not None:
         geometry = model.posed({"body_scale": scale, "deform": deform.params_to_dict(params), "pec_droop_deg": pec_droop, "fluke_curl_deg": fluke_curl,
-                                "pose": {"clip_t": clip_t} | ({"bend": "procedural"} if procedural_bend else {}), "individual": individual})
+                                "pose": {"clip_t": clip_t} | ({"bend": "procedural"} if procedural_bend else {}), "individual": individual}
+                               | ({"pec_side_deg": pec_side} if pec_side else {}))
     spray_cfg = config["splash"]
     if pose.splash and rng.uniform() > spray_cfg["probability"].get(category, 1.0):
         pose = replace(pose, splash=None)                      # this time, no white water
@@ -373,10 +411,14 @@ def make_shot(index: int, rng: np.random.Generator, config: dict, vertices_cm: n
     elif pose.clearance_m > 0 and rng.uniform() < spray_cfg["extra_wash_fraction"]:
         pose = replace(pose, splash="wash", splash_scale=float(rng.uniform(0.3, 0.8)), splash_amount=float(rng.uniform(0.3, 0.8)))
     top_mask = ((geometry[:, 0] > poses.BACK_X_MIN_CM) & (geometry[:, 0] < poses.BACK_X_MAX_CM)) if category in poses.BACK_HEIGHT_CATEGORIES else None
+    if rz_info and rz_info.get("top_x"):
+        top_mask = (geometry[:, 0] > rz_info["top_x"][0]) & (geometry[:, 0] < rz_info["top_x"][1])
+    elif rz_info and rz_info.get("top") in ("pec", "fluke"):
+        top_mask = np.zeros(len(geometry), bool); top_mask[model.part_groups()["pectoral" if rz_info["top"] == "pec" else "fluke"]] = True
     placed = poses.place(geometry, pose, top_mask=top_mask)
     if category in HEAD_UNDER_CATEGORIES:
         # the head and front body stay under water in a fluking dive: pitch the nose down until they are
-        head = geometry[:, 0] > 150.0
+        head = geometry[:, 0] > 150.0 * (scale if rz_info is not None else 1.0)
         for _ in range(8):
             world_h = transform_mesh(geometry, placed["whale"])[head]
             if (world_h[:, 2] > 0.0).mean() < 0.01:
@@ -384,9 +426,39 @@ def make_shot(index: int, rng: np.random.Generator, config: dict, vertices_cm: n
             pose = replace(pose, pitch_deg=pose.pitch_deg - 6.0)
             placed = poses.place(geometry, pose, top_mask=top_mask)
     world = transform_mesh(geometry, placed["whale"])
-    companion = sample_companion(rng, config, model, category, pose, placed, geometry)
-    frame_world = np.concatenate([world, companion.pop("_world")]) if companion else world
-    camera = sample_camera_for_size(rng, config, pose, placed, frame_world, 0.0)
+    scene = None
+    if config.get("scenes") and model is not None and model.kind == "humpback4k":
+        # run06: N whales (factory.scenes); the camera frames the group or the primary with the others partly in frame
+        from factory import scenes as scenes_mod
+        scene = scenes_mod.sample_scene(rng, config, model, category, pose, placed, geometry, sea, {"individual": individual, "body_scale": scale})
+        companion = None
+        cam_config = rz_camera_config(config, rz_info, category, rng)
+        group_target = (config["scenes"] or {}).get("group_extent_target")
+        if scene["scene"]["framing"] == "group" and group_target:
+            cam_config = {**cam_config, "camera": {**cam_config["camera"], "extent_target": group_target}}    # a group shot spans more of the frame
+            cam_config["camera"].pop("extent_quantiles", None)
+        camera = sample_camera_for_size(rng, cam_config, pose, {"stats": {"aim_point": scene["aim_point"]}}, scene["frame_world"], 0.0)
+    else:
+        companion = sample_companion(rng, config, model, category, pose, placed, geometry)
+        frame_world = np.concatenate([world, companion.pop("_world")]) if companion else world
+        camera = sample_camera_for_size(rng, rz_camera_config(config, rz_info, category, rng), pose, placed, frame_world, 0.0)
+    if rz_info is not None and (config.get("realism") or {}).get("mirror_views") and rng.uniform() < 0.5:
+        # round 6: the camera mirrored across the vertical plane of the primary's long axis through the aim point, so
+        # whales travel left and right equally (the camera draw had a side preference)
+        aim_m = np.asarray(scene["aim_point"] if scene else placed["stats"]["aim_point"], float)
+        hd = np.array([math.cos(math.radians(pose.yaw_deg)), math.sin(math.radians(pose.yaw_deg))])
+        rel = np.asarray(camera["location"][:2], float) - aim_m[:2]
+        rel = 2.0 * (rel @ hd) * hd - rel
+        camera["location"][0], camera["location"][1] = round(float(aim_m[0] + rel[0]), 2), round(float(aim_m[1] + rel[1]), 2)
+        camera["rotation"]["yaw"] = round(2.0 * float(pose.yaw_deg) - float(camera["rotation"]["yaw"]), 4)
+        camera["rotation"]["roll"] = round(-float(camera["rotation"].get("roll", 0.0)), 3)
+        camera["bearing_deg"] = round((360.0 - float(camera.get("bearing_deg", 0.0))) % 360.0, 2)
+        rz_info["mirrored"] = True
+    extras = []
+    if rz_info is not None:
+        from factory import realism as rz
+        extras = rz.extra_splashes(rng, config, model, category, geometry, placed["whale"], camera["location"], scale,
+                                   Camera(camera["location"], camera["rotation"], camera["focal_mm"], *config["resolution"]))
     no_whale = rng.uniform() < config["no_whale_in_frame_fraction"]
     if no_whale:
         camera["rotation"]["yaw"] = round(camera["rotation"]["yaw"] + rng.choice([-1, 1]) * rng.uniform(30.0, 70.0), 4)
@@ -396,12 +468,17 @@ def make_shot(index: int, rng: np.random.Generator, config: dict, vertices_cm: n
         sun, overcast = sky_sun, sky_overcast                                   # the sun follows the real sky
     # Depth of field like a long-lens field photo: focus on the whale's above-water centroid, the
     # f-number log-uniform in camera.aperture_f. wf_build_batch keys both on the cine camera.
-    aim = np.asarray(placed["stats"]["aim_point"], float)
+    aim = np.asarray(scene["aim_point"] if scene else placed["stats"]["aim_point"], float)
     camera["focus_distance_m"] = round(float(np.linalg.norm(aim - np.asarray(camera["location"], float))) / 100.0, 2)
     f_lo, f_hi = config["camera"].get("aperture_f", [4.0, 11.0])
     camera["aperture_f"] = round(float(log_uniform(rng, f_lo, f_hi)), 2)
     look = weighted_choice(rng, {name: spec["weight"] for name, spec in config["looks"].items()})
     splash_spec = placed["splash"]
+    if rz_info is not None and splash_spec and (config.get("realism") or {}).get("splash_seed"):
+        splash_spec["seed"] = int(rng.integers(1 << 30))           # every splash its own pattern (all were seed 0)
+    if rz_info is not None and splash_spec and (config.get("realism") or {}).get("splash_by_body_part"):
+        from factory import realism as rz
+        rz.resize_splash(rng, category, splash_spec, scale)
     shot = {
         "id": f"{index:06d}",
         "name": f"{index:06d}_{category}_{sea}",
@@ -435,6 +512,27 @@ def make_shot(index: int, rng: np.random.Generator, config: dict, vertices_cm: n
         "stats": placed["stats"],
         "ocean": {"vectors": dict(config["looks"][look]["vectors"])},
     }
+    if rz_info is not None:
+        from factory import realism as rz
+        if pec_side:
+            shot["pec_side_deg"] = pec_side
+        shot["exposure_ev100"] = rz.exposure_ev100(rng, config, sun, overcast)   # fixed exposure (wf_build_batch locks auto-exposure to it)
+        meter = rz.subject_metering(config, category, float(camera.get("extent_frame_fraction", 0.0)))
+        if meter:
+            shot["exposure_ev100"] = round(shot["exposure_ev100"] + meter, 3)
+            rz_info["metering_ev"] = round(meter, 3)
+        shot["exposure_ev"] = float((rz.cfg(config).get("exposure") or {}).get("bias", 0.0))
+        fb = config["camera"].get("filmback_mm")
+        if fb:
+            camera["filmback_mm"] = list(fb)
+            camera["focal_mm_field_equivalent"] = round(camera["focal_mm"] * float(rz.cfg(config).get("field_sensor_width_mm", 22.3)) / float(fb[0]), 2)
+        rz_info["end_on"] = bool(rz_info.get("end_on", False))
+    comps = scene["companions"] if scene else []
+    if scene:
+        shot["companions"] = comps                 # finished below (scene offset, wave lift, white water), then made public
+        shot["scene"] = scene["scene"]
+        shot["negative"] = bool(no_whale or (placed["stats"]["vertex_fraction_above_water"] == 0.0
+                                             and all(c["stats"]["vertex_fraction_above_water"] == 0.0 for c in comps)))
     # The ocean renders ONE wave set per batch (wf_build_batch applies batch["waves"]), and batches group shots
     # by (sea state, look): the wave seed must therefore be a function of those, never of the shot, or the lift
     # onto the surface, the white water and the through-water labels are computed on waves the render never
@@ -465,7 +563,9 @@ def make_shot(index: int, rng: np.random.Generator, config: dict, vertices_cm: n
         if best_score is None or score < best_score:
             best, best_score = off, score
     ox, oy = (round(float(best[0]), 2), round(float(best[1]), 2))
-    for loc in (shot["whale"]["location"], camera["location"]) + ((companion["whale"]["location"],) if companion else ()) + ((splash_spec["centre_cm"],) if splash_spec else ()):
+    for loc in (shot["whale"]["location"], camera["location"]) + ((companion["whale"]["location"],) if companion else ()) + ((splash_spec["centre_cm"],) if splash_spec else ()) \
+            + tuple(c["whale"]["location"] for c in comps) + tuple(c["splash"]["centre_cm"] for c in comps if c.get("splash")) + tuple(c["stats"]["aim_point"] for c in comps) \
+            + tuple(e["centre_cm"] for e in extras):
         loc[0] = round(loc[0] + ox, 2); loc[1] = round(loc[1] + oy, 2)
     placed["stats"]["aim_point"] = [round(aim0[0] + ox, 2), round(aim0[1] + oy, 2), round(float(aim0[2]), 2)]
     aim = placed["stats"]["aim_point"]
@@ -492,6 +592,32 @@ def make_shot(index: int, rng: np.random.Generator, config: dict, vertices_cm: n
         splash_spec["centre_cm"][2] = round(splash_spec["centre_cm"][2] + ds, 2)
         shot["water_surface_z_cm"]["splash"] = round(ds, 2)
     shot["whitewater"] = whitewater.spec(shot, world + np.array([0.0, 0.0, dz]), waves, t, rng, config)
+    if extras:
+        for e in extras:                                   # run06 realism: blow and front spray ride the waves too
+            e["centre_cm"][2] = round(e["centre_cm"][2] + float(gerstner.surface_height(waves, e["centre_cm"][0], e["centre_cm"][1], t)), 2)
+        shot["extra_splashes"] = extras
+    if rz_info is not None and (config.get("realism") or {}).get("splash_pack"):
+        from factory import realism as rz
+        niag = rz.niagara_specs(rng, config, category, shot)
+        if niag:
+            shot["niagara"] = niag
+    if scene:
+        # every further animal rides the swell at its own position and gets its own white water, splash and wetness
+        from factory import scenes as scenes_mod
+        lifts = []
+        for c in comps:
+            cx, cy = c["whale"]["location"][:2]
+            dzc = float(gerstner.surface_height(waves, cx, cy, t))
+            c["whale"]["location"][2] = round(c["whale"]["location"][2] + dzc, 2)
+            c["water_surface_z_cm"] = {"whale": round(dzc, 2)}
+            if c.get("splash"):
+                dsc = float(gerstner.surface_height(waves, c["splash"]["centre_cm"][0], c["splash"]["centre_cm"][1], t))
+                c["splash"]["centre_cm"][2] = round(c["splash"]["centre_cm"][2] + dsc, 2)
+                c["water_surface_z_cm"]["splash"] = round(dsc, 2)
+            c["whitewater"] = whitewater.spec(c, transform_mesh(c["_geometry"], c["whale"]), waves, t, rng, config)
+            lifts.append(round(dzc, 2))
+        shot["water_surface_z_cm"]["companions"] = lifts
+        shot["companions"] = [scenes_mod.public(c) for c in comps]
     # Under a long lens the fine chop is sub-pixel: scale the water's normal-map strength down with the
     # focal length (camera.normal_strength_focal_mm), otherwise it renders as aliased streaks.
     ref = config["camera"].get("normal_strength_focal_mm")
@@ -502,7 +628,59 @@ def make_shot(index: int, rng: np.random.Generator, config: dict, vertices_cm: n
             if key in scalars:
                 scalars[key] = round(scalars[key] * k, 4)
         shot["ocean"]["normal_strength_scale"] = round(k, 4)
+    water = (config.get("realism") or {}).get("water") if rz_info is not None else None
+    if water:                                    # run06 realism round 2: centimetre roughness, no mirror (factory.realism)
+        from factory import realism as rz
+        rz.water_detail(shot, water)
+    if rz_info is not None and (config.get("realism") or {}).get("ocean_scalars"):
+        shot["ocean"].setdefault("scalars", {}).update(config["realism"]["ocean_scalars"])   # run06 realism: weaker mirror reflection
+    if rz_info is not None:
+        from factory import realism as rz
+        rz_info["hard"] = rz.hard_tags(shot, rz_info.get("end_on", False))
+        shot["realism"] = rz_info
+    paste = config.get("paste_material")
+    if paste:                                    # run06 round 4: whales to paste into real photos (the photo brings its water)
+        strip_water_effects(shot, paste)
+    suffix = (config.get("whale") or {}).get("skin_suffix")
+    if suffix:                                   # run06 realism round 3: the darker field-like maps (factory.skin_run06)
+        for animal in [shot] + list(shot.get("companions") or []) + ([shot["companion"]] if shot.get("companion") else []):
+            if str(animal.get("skin", "00")) != "00":
+                animal["skin"] = f"{animal['skin']}{suffix}"
     return shot
+
+
+def rz_camera_config(config: dict, rz_info, category: str, rng) -> dict:
+    """run06 realism: the camera config of this shot, with the category's bearing sectors (flukes mostly from behind)
+    or an end-on back view; the config itself otherwise (no rng drawn)."""
+    if rz_info is None:
+        return config
+    from factory import realism as rz
+    sectors, endon = rz.bearing_sectors(config, category, rng)
+    rz_info["end_on"] = endon
+    cam = dict(config["camera"])
+    if sectors:
+        cam["bearing_sectors"] = sectors
+    scale = ((config.get("realism") or {}).get("extent_scale_by_category") or {}).get(category)
+    if scale and cam.get("extent_quantiles"):        # round 6: flukes framed smaller (fluke pixels were 2.5x the real share)
+        cam["extent_quantiles"] = [[q, round(v * float(scale), 4)] for q, v in cam["extent_quantiles"]]
+    if sectors or scale:
+        return {**config, "camera": cam}
+    return config
+
+
+def strip_water_effects(shot: dict, paste: dict) -> None:
+    """Paste material (config "paste_material"): drop the rendered white water a real photo brings itself, per switch:
+    "streams" / "front_spray" / "blow" false drop those extra splashes, "splash" false the slap / breach splash of every
+    animal, "whitewater" false the foam carpet and aerated cloud of every animal. The labels follow (no coverage twins)."""
+    keep = {"fluke_streams": paste.get("streams", False), "front_spray": paste.get("front_spray", False), "blow": paste.get("blow", False)}
+    if shot.get("extra_splashes"):
+        shot["extra_splashes"] = [e for e in shot["extra_splashes"] if keep.get(e.get("role"), False)]
+    for animal in [shot] + list(shot.get("companions") or []) + ([shot["companion"]] if shot.get("companion") else []):
+        if not paste.get("splash", False) and animal.get("splash"):
+            animal["splash"] = None
+        if not paste.get("whitewater", False) and animal.get("whitewater"):
+            animal["whitewater"] = None
+    shot.pop("niagara", None)
 
 
 def posed_world(shot: dict, vertices_cm: np.ndarray, fin_regions: dict | None, model: WhaleModel | None = None) -> np.ndarray:
@@ -565,6 +743,16 @@ def main(argv: list[str] | None = None) -> int:
         if shot.get("whitewater"):
             whitewater.ensure_obj(shot["whitewater"], args.out_dir / "whitewater", shot["id"], posed_world(shot, vertices, regions, model if model.kind != "k9239" else None),
                                   gerstner.generate_waves(shot["waves"]), shot.get("splash"))
+        for k, e in enumerate(shot.get("extra_splashes") or []):     # run06 realism: blow, front spray
+            splash.ensure_obj(e, args.out_dir / "splash", f"{shot['id']}x{k}")
+            if not e["mesh"]["faces"]:
+                e["mesh_obj"] = None                                    # nothing left to render (e.g. all streams broke up)
+        for c in shot.get("companions") or []:                 # run06 scenes: each further animal's own splash and white water
+            name = f"{shot['id']}a{c['instance_id']}"
+            splash.ensure_obj(c.get("splash"), args.out_dir / "splash", name)
+            if c.get("whitewater"):
+                whitewater.ensure_obj(c["whitewater"], args.out_dir / "whitewater", name, transform_mesh(model.posed(c), c["whale"]),
+                                      gerstner.generate_waves(shot["waves"]), c.get("splash"))
     (args.out_dir / "run_config.json").write_text(json.dumps({"config": config, "seed": args.seed, "count": args.count,
                                                               "mesh": str(args.mesh)}, indent=2))
     with open(args.out_dir / "shotlist.jsonl", "w") as handle:
@@ -579,6 +767,23 @@ def main(argv: list[str] | None = None) -> int:
         batch["whale_kind"] = model.kind
         batch["islands"] = islands.place(np.random.default_rng([args.seed, batch["index"]]), library, config) if library else []
         batch["frames_per_shot"] = config["frames_per_shot"]
+        if config.get("atmosphere"):                          # run06 realism: sky atmosphere (wf_shot.apply_atmosphere)
+            batch["atmosphere"] = dict(config["atmosphere"])
+        if (config.get("whale") or {}).get("individuals"):    # run06 realism: its own individual library (deform.write_batch_meshes)
+            batch["individuals"] = config["whale"]["individuals"]
+        if (config.get("whale") or {}).get("dorsal_front_ratio"):  # run06 round 5: the render's meshes need the same hump (deform)
+            batch["dorsal_front_ratio"] = float(config["whale"]["dorsal_front_ratio"])
+        if (config.get("whale") or {}).get("ridge_soften"):        # run06 round 8: and the same ridge
+            batch["ridge_soften"] = float(config["whale"]["ridge_soften"])
+        if (config.get("whale") or {}).get("blade_templates"):     # run06 round 7: and the same parametric blade
+            batch["blade_templates"] = config["whale"]["blade_templates"]
+        if config.get("grade"):                               # run06 realism: camera picture style (wf_shot.apply_grade)
+            batch["grade"] = dict(config["grade"])
+        for key in ("clouds", "fog_batch", "skin_look", "skin_bake"):   # run06 realism round 2/3/8: sky without cumulus, hazy horizon, skin (wf_shot)
+            if config.get(key) is not None:
+                batch[key] = config[key]
+        if config["camera"].get("filmback_mm"):              # run06 realism: 3:2 filmback (wf_build_batch)
+            batch["filmback_mm"] = list(config["camera"]["filmback_mm"])
         (batch_dir / f"batch_{batch['index']:03d}.json").write_text(json.dumps(batch))
     categories = {}
     for shot in shots:
@@ -591,6 +796,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"above-water extent (fraction of frame, whale shots): min {extents.min():.2f} p10 {np.percentile(extents, 10):.2f} "
               f"median {np.median(extents):.2f} max {extents.max():.2f}; "
               f"below {config['camera'].get('min_extent_frame_fraction', 0.0):.2f}: {(extents < config['camera'].get('min_extent_frame_fraction', 0.0)).sum()}")
+    if any(s.get("scene") for s in shots):
+        print("scenes:", dict(sorted(Counter(s["scene"]["type"] for s in shots if s.get("scene")).items())),
+              "animals per shot:", dict(sorted(Counter(s["scene"]["animals"] for s in shots if s.get("scene")).items())),
+              "framing:", dict(Counter(s["scene"]["framing"] for s in shots if s.get("scene"))),
+              "dropped animals:", sum(s["scene"]["dropped"] for s in shots if s.get("scene")))
     print("deformed:", sum(not deform.params_from_dict(s["deform"]).is_identity() for s in shots),
           "skins:", dict(sorted(Counter(s["skin"] for s in shots).items())))
     return 0

@@ -26,7 +26,7 @@ def log(message: str) -> None:
 
 
 def make_config(name: str, with_label: bool, label_material: str = LABEL_MATERIAL, warmup: int = WARMUP_FRAMES,
-                resolution=(WIDTH, HEIGHT), spatial_samples: int = 1) -> None:
+                resolution=(WIDTH, HEIGHT), spatial_samples: int = 1, path_tracer: bool = False) -> None:
     path = f"{CONFIG_DIR}/{name}"
     if unreal.EditorAssetLibrary.does_asset_exist(path):
         unreal.EditorAssetLibrary.delete_asset(path)
@@ -35,7 +35,14 @@ def make_config(name: str, with_label: bool, label_material: str = LABEL_MATERIA
     if config is None:
         raise RuntimeError("could not create the MRQ config asset")
 
-    deferred = config.find_or_add_setting_by_class(unreal.MoviePipelineDeferredPassBase)
+    # path_tracer (run06 engine upgrade test only): the path-traced beauty pass, the label pass on it as a post-process
+    # material, spatial samples = samples per pixel, denoised
+    deferred = config.find_or_add_setting_by_class(unreal.MoviePipelineDeferredPass_PathTracer if path_tracer else unreal.MoviePipelineDeferredPassBase)
+    if path_tracer:
+        try:
+            deferred.set_editor_property("denoiser", True)
+        except Exception as exc:
+            log(f"path tracer denoiser property not set: {exc}")
     if with_label:
         label = unreal.MoviePipelinePostProcessPass()
         label.set_editor_property("enabled", True)
@@ -78,10 +85,11 @@ def main() -> None:
     log("OK")
 
 
-try:
-    main()
-except Exception:
-    unreal.log_error("[wf_make_render_config] " + traceback.format_exc())
-finally:
-    if os.environ.get("WF_QUIT_WHEN_DONE"):
-        unreal.SystemLibrary.quit_editor()
+if not os.environ.get("WF_IMPORT_ONLY"):          # wf_make_instance_labels imports this module for make_config
+    try:
+        main()
+    except Exception:
+        unreal.log_error("[wf_make_render_config] " + traceback.format_exc())
+    finally:
+        if os.environ.get("WF_QUIT_WHEN_DONE"):
+            unreal.SystemLibrary.quit_editor()

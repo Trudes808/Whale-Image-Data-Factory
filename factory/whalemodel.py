@@ -51,14 +51,22 @@ KEYFRAMES = {
     # the surfacing categories share the straight-ish frames of the clip's start; their hump is procedural (shotlist.PROCEDURAL_POSES)
     "logging": [0.2, 0.3, 0.35, 0.45], "blow": [0.2, 0.3, 0.35, 0.45], "blow_sliver": [0.2, 0.3, 0.35, 0.45],
     "awash": [0.2, 0.3, 0.35, 0.45], "submerged": [0.0, 12.0, 13.4],
-    "arch": [0.3, 0.6], "peduncle": [0.8, 1.0, 13.8, 25.5],
+    "arch": [0.3, 0.6], "peduncle": [0.8, 1.0, 13.8, 25.5], "tail_stock": [0.8, 1.0, 13.8, 25.5],
     "back_arch": [0.2, 0.3, 0.35, 0.45], "surface": [0.2, 0.3, 0.35, 0.45],     # straight-ish frames from the start of the clip; the hump is procedural (shotlist)
     "fluke_up": [0.8, 1.0, 1.2, 1.4, 1.6, 1.9, 2.2], "fluke_edge": [1.6, 1.9, 2.2], "fluke_down": [1.0, 1.2, 1.4, 1.6],   # the whole dive; the fluke curl (shotlist) adds the tips-down phase
     "breach": [2.9, 7.4, 16.2, 16.6],          # 15.6 tears the dorsal-fin base seam in the asset's skinning
     "pec_up": [0.0, 0.3, 12.0], "fin_tip": [0.0, 0.3, 12.0], "roll_belly": [0.0, 0.3, 12.0],
     "spyhop": [0.0, 2.9, 16.6], "spyhop_low": [0.0, 2.9, 16.6],
+    # run06 realism categories (their clip time is set by factory.realism; these are the fallbacks)
+    "fluke_rollout": [0.8, 1.0], "fluke_sinking": [1.4, 1.6], "pec_slap": [0.0, 0.3, 12.0], "head_rise": [0.0, 0.3, 12.0],
+    "tail_slap": [4.0, 5.0], "peduncle_throw": [0.0, 0.3, 12.0],
 }
 KEYFRAME_JITTER_S = 0.05
+# run06 per-pixel part taxonomy (WhaleModel.part_groups; postprocess parts/<id>.png): 0 background
+PART_IDS = {"fluke": 1, "dorsal": 2, "pectoral": 3, "head": 4, "body": 5}
+DORSAL_HUMP_HALF_WIDTH_CM = 35.0      # the hump under the blade: this far either side of the midline (unit-size rest mesh)
+DORSAL_HUMP_DEPTH_CM = 12.0           # ... and down to this far below the back-base -> front-base line
+HEAD_BEHIND_BLOWHOLE_CM = 30.0        # the head ends on a cross plane this far behind the blowhole
 CLIP_WINDOWS = {k: [(t, t) for t in v] for k, v in KEYFRAMES.items()}     # kept for callers that list windows
 REST_FRACTION: dict = {}          # the bind pose is arched: no category samples it
 
@@ -134,9 +142,254 @@ class WhaleModel:
             raise ValueError(kind)
         self.fin_regions = deform.fin_regions(self.rest) if kind == "k9239" else deform.fin_regions(self.canonical)
 
+    library_path = None                   # the individual library (None: individuals.LIBRARY or WF_INDIVIDUALS)
+
     @classmethod
     def from_config(cls, config: dict, rig=None) -> "WhaleModel":
-        return cls((config.get("whale") or {}).get("kind", "k9239"), rig)
+        model = cls((config.get("whale") or {}).get("kind", "k9239"), rig)
+        if (config.get("whale") or {}).get("landmarks_v2"):
+            model.landmarks_v2 = True
+        if (config.get("whale") or {}).get("dorsal_front_ratio"):    # run06 round 5: the fin's front base where the hump's slope starts
+            model.dorsal_front_ratio = float(config["whale"]["dorsal_front_ratio"])
+        if (config.get("whale") or {}).get("ridge_soften"):           # run06 round 8: ridge knobs behind the fin toned down
+            model.ridge_soften = float(config["whale"]["ridge_soften"])
+        lib = (config.get("whale") or {}).get("individuals")          # run06 realism: its own library (same ids and textures)
+        if lib:
+            model.library_path = Path(lib) if Path(lib).is_absolute() else REPO_ROOT / lib
+        if (config.get("whale") or {}).get("blade_templates"):          # run06 round 7: the parametric dorsal blade
+            bt = config["whale"]["blade_templates"]
+            model.enable_blade(Path(bt) if Path(bt).is_absolute() else REPO_ROOT / bt)
+        return model
+
+    # ---- run06 round 7: the parametric dorsal blade (factory.blade) ------------------------------------------------
+    def enable_blade(self, templates_path) -> None:
+        """Append one parametric blade to the model's vertex arrays (rest, faces, canonical, uv, groups "blade"); the
+        asset's own blade is flattened by the individuals (dorsal_height near 0). Landmarks dorsal_fin_tip / _back /
+        _front and the fin_te_* / fin_le_* chains move onto the blade; its vertices are the dorsal part and the blade
+        sub-label. Each individual's blade shape comes from its library entry (blade_template, blade_H_cm, ...), placed
+        on the back at the asset's back junction and carried by the pose through a rigid fit to the nearby back."""
+        from factory import blade as bl
+        fin = self.dorsal_fin()
+        self.faces = self._close_old_blade(np.asarray(self.faces), np.asarray(fin["w"]))
+        self.n_rig = len(self.rest); self.n_rig_faces = len(self.faces)
+        self._blade_lib = bl.load_templates(templates_path)
+        R = self.rest
+        B = R[fin["back"]].astype(float)
+        fb = fin.get("front_base", fin["front"])
+        Fp = R[fb].mean(0) if isinstance(fb, (list, tuple)) else R[fb]
+        along = Fp - B; along[1] = 0.0; along /= max(np.linalg.norm(along), 1e-6)
+        up = np.array([-along[2], 0.0, along[0]])
+        if up[2] < 0:
+            up = -up
+        self._blade_frame = (B, along, up)
+        # the back's midline profile (top of the body per 4 cm of x, off the asset blade), so each blade's base line runs
+        # from its back base to the point on the back where its own front base lies
+        # Only the top surface counts: a 4 cm bin without a top midline vertex would otherwise take a belly vertex, so the
+        # bins use a wider window and samples below the running top line are dropped. The midline's top vertex per bin is
+        # also kept by index: the posed blade follows the posed back through them.
+        w0 = np.asarray(fin["w"]); mid = (np.abs(R[:, 1]) < 10.0) & (w0 < 0.05)
+        xs = np.arange(B[0] - 150.0, B[0] + 400.0, 4.0)
+        zs = np.full(len(xs), np.nan); bidx = np.full(len(xs), -1)
+        for j, xx in enumerate(xs):
+            sel = np.nonzero(mid & (np.abs(R[:, 0] - xx) < 5.0))[0]
+            if len(sel):
+                bidx[j] = int(sel[np.argmax(R[sel, 2])]); zs[j] = R[bidx[j], 2]
+        ok = ~np.isnan(zs)
+        top = np.array([np.nanmax(zs[max(0, j - 6): j + 7]) if ok[j] else np.nan for j in range(len(xs))])
+        ok &= zs > top - 25.0
+        self._back_profile = (xs[ok], zs[ok])
+        self._back_idx = bidx[ok].astype(int)
+        # anchors: back vertices near the base, off the asset blade (for the pose transfer)
+        w = np.asarray(fin["w"]); d = np.linalg.norm(R - B, axis=1)
+        self._blade_anchors = np.nonzero((d < 90.0) & (d > 10.0) & (w < 0.05))[0]
+        default = self._blade_local(None)
+        blade_rest = self._blade_place(default)
+        nb = len(blade_rest)
+        self.rest = np.concatenate([R, blade_rest])
+        self.faces = np.concatenate([self.faces, default["faces"] + self.n_rig])
+        self.groups = {**self.groups, "blade": np.arange(self.n_rig, self.n_rig + nb)}
+        anchor = np.argmin(((R[self._blade_anchors] - B) ** 2).sum(1))
+        a_i = self._blade_anchors[anchor]
+        self.canonical = np.concatenate([self.canonical, blade_rest + (self.canonical[a_i] - R[a_i])])
+        self._blade_uv = self._blade_back_uv(fin, R, B, along, up)
+        self._blade_local_lm = default["landmarks"]
+        for k in ("_part_groups", "_tiny_edges"):
+            self.__dict__.pop(k, None)
+
+    def _blade_back_uv(self, fin: dict, R: np.ndarray, B, along, up) -> np.ndarray:
+        """round 8: blade UVs on the dark back skin beside the fin, at the body's own texel density: an affine map from the
+        back's (along, across) cm around the fin to its UVs (robust fit), evaluated at the blade's (along, height) cm with
+        both sides on the same patch (no seam at the edges). The asset fin's own UV island carries the old fin's creases
+        in the normal map, which showed as crumpled pale planes on the larger blade."""
+        from factory import blade as bl
+        w = np.asarray(fin["w"])
+        rel = R - B; aa, hh, yy = rel @ along, rel @ up, rel[:, 1]
+        sel = (w < 0.02) & (np.abs(aa) < 120.0) & (np.abs(yy) < 60.0) & (hh > -40.0)
+        X = np.stack([aa[sel], yy[sel], np.ones(int(sel.sum()))], 1); U = self.rig.uv[sel]
+        best = None
+        for sgn in (1.0, -1.0):                     # one side of the back (a UV island each side of the midline)
+            s = X[:, 1] * sgn >= 0
+            Xs, Us = X[s], U[s]
+            keep = np.ones(len(Xs), bool)
+            for _ in range(3):
+                c = np.linalg.lstsq(Xs[keep], Us[keep], rcond=None)[0]
+                r = np.abs(Xs @ c - Us).max(1)
+                keep = r <= max(3.0 * float(np.median(r)), 1e-4)
+            err = float(np.median(np.abs(Xs[keep] @ c - Us[keep])))
+            if best is None or err < best[0]:
+                best = (err, c, sgn, Us[keep].min(0), Us[keep].max(0))
+        _, c, sgn, lo, hi = best
+        local = self._blade_local(None)["vertices"]          # default blade (cm): a along, y across, h up
+        a_cm = np.clip(local[:, 0], -100.0, 110.0)
+        across = sgn * np.clip(0.55 * np.clip(local[:, 2], 0.0, None) + np.abs(local[:, 1]), 0.0, 55.0)
+        uv = np.stack([a_cm, across, np.ones(len(local))], 1) @ c
+        return np.clip(uv, lo, hi)
+
+    def _blade_island_uv(self, fin: dict, R: np.ndarray, B, along, up, Fp) -> np.ndarray:
+        """Blade UVs spread over the asset fin's own UV island (dark in the run06 skin maps): an affine map from the
+        asset fin's (along, up) to its UVs (robust fit on its better-fitting side, used for both sides so the leading and
+        trailing edges carry no seam); each blade vertex is put at the same chord fraction and height fraction of the
+        asset fin's triangle, so tangents are well defined and the texture detail is the fin's."""
+        from factory import blade as bl
+        w = np.asarray(fin["w"]); idx = np.nonzero(w > 0.5)[0]
+        rel = R[idx] - B; aa, hh, yy = rel @ along, rel @ up, rel[:, 1]
+        U = self.rig.uv[idx]
+        best = None
+        for sgn in (1.0, -1.0):
+            s = yy * sgn >= 0
+            if s.sum() < 6:
+                continue
+            X = np.stack([aa[s], hh[s], np.ones(int(s.sum()))], 1); Us = U[s]
+            keep = np.ones(len(X), bool)
+            for _ in range(2):                                   # drop vertices of another island (seams)
+                c = np.linalg.lstsq(X[keep], Us[keep], rcond=None)[0]
+                r = np.abs(X @ c - Us).max(1)
+                keep = r <= max(3.0 * float(np.median(r)), 1e-4)
+            err = float(np.abs(X[keep] @ c - Us[keep]).max())
+            if best is None or err < best[0]:
+                best = (err, c, Us[keep].min(0), Us[keep].max(0))
+        _, c, lo, hi = best
+        Ha = max(float(hh.max()), 1.0)
+        ta = float((R[fin["tip"]] - B) @ along); La = float((Fp - B) @ along)
+        R2 = 2 * bl.NC
+        s_c = (1 - np.cos(np.linspace(0, np.pi, bl.NC))) / 2
+        k = np.arange(bl.N_VERTS - 1) // R2; i = np.arange(bl.N_VERTS - 1) % R2
+        s = np.where(i < bl.NC, s_c[np.minimum(i, bl.NC - 1)], s_c[np.clip(R2 - 1 - i, 0, bl.NC - 1)])
+        hn = np.clip(bl.LEVELS[k], 0.0, 1.0)
+        te = ta * hn; le = La + (ta - La) * hn
+        a_as = te + s * (le - te); h_as = hn * Ha
+        uv = np.stack([a_as, h_as, np.ones_like(a_as)], 1) @ c
+        tip = np.array([[ta, Ha, 1.0]]) @ c
+        return np.clip(np.concatenate([uv, tip]), lo, hi)
+
+    def _blade_local(self, ind) -> dict:
+        """The blade (blade-local cm) of an individual (its library entry), or the default (template 0, H 45 cm)."""
+        from factory import blade as bl
+        spec = None
+        if ind is not None:
+            try:
+                spec = self.individual(ind)["spec"]
+            except Exception:
+                spec = None
+        t = int(getattr(spec, "blade_template", -1)) if spec is not None else -1
+        if t < 0:
+            t, H, nicks, thick, seed = 0, 45.0, 0, 1.0, 0
+        else:
+            H, nicks, thick, seed = float(spec.blade_H_cm), int(spec.blade_nicks), float(spec.blade_thickness), int(spec.seed)
+        cache = self.__dict__.setdefault("_blade_cache", {})
+        key = (t, round(H, 3), nicks, round(thick, 3), seed)
+        if key not in cache:
+            temps = self._blade_lib["templates"]
+            cache[key] = bl.make(temps[t % len(temps)], self._blade_lib["heights"], H, np.random.default_rng(seed + 991), nicks, thick)
+        return cache[key]
+
+    def _blade_frame_for(self, local: dict):
+        """Back base on the back's midline at the asset's back junction, base line to the point on the back that is the
+        blade's own base length ahead (so both feet sit on the skin), up perpendicular to it in the x-z plane."""
+        B0, along0, _ = self._blade_frame
+        xs, zs = self._back_profile
+        V, lm = local["vertices"], local["landmarks"]
+        L = float(np.linalg.norm(V[lm["front_base"]] - V[lm["back_base"]]))
+        xb = B0[0] - 6.0                 # round 8: 6 cm behind the asset junction, so the old blade's footprint is under the new one
+        B = np.array([xb, 0.0, float(np.interp(xb, xs, zs))])
+        cand = np.stack([xs, np.zeros_like(xs), zs], 1)
+        dist = np.linalg.norm(cand - B, axis=1); ahead = cand[:, 0] > B[0]
+        if ahead.any():
+            j = np.argmin(np.where(ahead, np.abs(dist - L), np.inf))
+            along = cand[j] - B; along /= max(np.linalg.norm(along), 1e-6)
+        else:
+            along = along0
+        up = np.array([-along[2], 0.0, along[0]])
+        if up[2] < 0:
+            up = -up
+        return B, along, up
+
+    def _close_old_blade(self, F: np.ndarray, w: np.ndarray) -> np.ndarray:
+        """round 8: the asset blade's faces (any vertex with fin weight > 0.5) are removed and the hole is closed with a fan
+        from the core vertex nearest the hole's centre (projected onto the fitted back by the individual's edit), so no
+        folded, coincident or sunk faces remain beside the parametric blade."""
+        core = w > 0.5
+        drop = core[F].any(1)
+        if not drop.any():
+            return F
+        removed = F[drop]
+        und = {}
+        for a, b, c in removed:
+            for e in ((a, b), (b, c), (c, a)):
+                und[frozenset(e)] = und.get(frozenset(e), 0) + 1
+        kept_edges = set()
+        for a, b, c in F[~drop]:
+            for e in ((a, b), (b, c), (c, a)):
+                kept_edges.add(frozenset(e))
+        boundary = [(a, b) for tri in removed for a, b in ((tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0]))
+                    if und[frozenset((a, b))] == 1 and frozenset((a, b)) in kept_edges]
+        if len(boundary) < 3:
+            return F
+        bverts = np.unique(np.array(boundary).ravel())
+        cand = np.nonzero(core)[0]
+        centre = int(cand[np.argmin(np.linalg.norm(self.rest[cand] - self.rest[bverts].mean(0), axis=1))])
+        fan = np.array([(a, b, centre) for a, b in boundary if centre not in (a, b)], dtype=F.dtype)
+        return np.concatenate([F[~drop], fan])
+
+    def _blade_place(self, local: dict) -> np.ndarray:
+        """round 8: the blade placed on the back and draped onto it: its lower part (the hump) keeps its height above the
+        back's midline profile rather than above the straight base line, and its flanks follow the back's lateral fall
+        (z = z0 - 0.019 y^2, measured beside the fin), so the hump merges into the back instead of cutting it as a wedge;
+        the top of the blade is left straight."""
+        from factory import blade as bl
+        B, along, up = self._blade_frame_for(local)
+        L = np.asarray(local["vertices"], float)
+        V = bl.place(L, B, along, up)
+        H = max(float(L[:, 2].max()), 1.0)
+        hn = L[:, 2] / H
+
+        def sm(t, a, b):
+            q = np.clip((t - a) / (b - a), 0.0, 1.0); return q * q * (3 - 2 * q)
+        xs, zs = self._back_profile
+        xl = B[0] + L[:, 0] * along[0]; zl = B[2] + L[:, 0] * along[2]
+        dz = (np.interp(xl, xs, zs) - zl) * (1.0 - sm(hn, 0.0, 0.25)) - 0.019 * L[:, 1] ** 2 * (1.0 - sm(hn, 0.05, 0.5))
+        V[:, 2] += dz
+        return V
+
+    def _blade_posed(self, rig_posed: np.ndarray, ind, scale: float) -> np.ndarray:
+        from factory import blade as bl
+        local = self._blade_local(ind)
+        rest_b = self._blade_place(local) * scale
+        a = self._blade_anchors
+        Rm, t = bl.kabsch(self.rest[a] * scale, rig_posed[a])
+        out = rest_b @ Rm.T + t
+        # the rigid fit holds near the back base; ahead of it an arched or bent back drops away (and an individual's girth
+        # moves it): every blade vertex also takes the posed back's offset from the rigid fit at its own x, so both feet
+        # and the hump's front slope stay on the skin
+        bi = getattr(self, "_back_idx", None)
+        if bi is not None and len(bi) > 4:
+            res = rig_posed[bi] - (self.rest[bi] * scale @ Rm.T + t)
+            xb = self.rest[bi, 0] * scale; o = np.argsort(xb); xb = xb[o]; res = res[o]
+            kern = np.ones(5) / 5.0
+            res = np.stack([np.convolve(np.pad(res[:, j], 2, mode="edge"), kern, mode="valid") for j in range(3)], 1)
+            xq = rest_b[:, 0]
+            out = out + np.stack([np.interp(xq, xb, res[:, j]) for j in range(3)], 1)
+        return out
 
     @staticmethod
     def _front_axis(jp: dict) -> np.ndarray:
@@ -150,7 +403,7 @@ class WhaleModel:
         from factory import individuals as indiv
         lib = getattr(self, "_library", None)
         if lib is None:
-            lib = self._library = indiv.load_library()
+            lib = self._library = indiv.load_library(self.library_path)
         return lib
 
     def dorsal_fin(self) -> dict:
@@ -165,7 +418,7 @@ class WhaleModel:
             return cached
         out = {}
         if self.kind == "humpback4k":
-            R = self.rest; x, y, z = R[:, 0], R[:, 1], R[:, 2]
+            R = self.rest[: getattr(self, "n_rig", len(self.rest))]; x, y, z = R[:, 0], R[:, 1], R[:, 2]
             length = x.max() - x.min(); xm = x.min()
             lo, hi = xm + 0.30 * length, xm + 0.55 * length                       # the back from the tail stock to mid-body
             step = 4.0; edges = np.arange(lo, hi + step, step); cx = (edges[:-1] + edges[1:]) / 2
@@ -236,7 +489,7 @@ class WhaleModel:
                         tw = np.clip((h - 1.0) / 8.0, 0.0, 1.0)
                         # The dorsal_fin_front label (front_base) is not the blade's root: see DORSAL_FRONT_RATIO. The blade
                         # root (front) stays the base-chord end for dorsal_region() / the individual edits and the fin_le chain.
-                        out = {"tip": tip, "back": back, "front": front, "front_base": self._dorsal_front_base(R, mid, tip, back, front),
+                        out = {"tip": tip, "back": back, "front": front, "front_base": self._dorsal_front_base(R, mid, tip, back, front, getattr(self, "dorsal_front_ratio", None)),
                                "fin_te": resample(trailing, n_chain), "fin_le": resample(leading, n_chain),
                                "h": h, "w": tw * tw * (3 - 2 * tw), "chord": float(np.linalg.norm(R[front] - R[back])), "n_blade": int(blade.sum()),
                                "excess_cm": float(excess[k_tip]), "x_range": (float(x0), float(x1))}
@@ -271,7 +524,8 @@ class WhaleModel:
         fin = self.dorsal_fin()
         if not fin:
             return {}
-        return {"dorsal_h": fin["h"], "dorsal_w": fin["w"], "dorsal_idx": (fin["tip"], fin["back"], fin["front"]), "dorsal_chord": fin["chord"]}
+        return {"dorsal_h": fin["h"], "dorsal_w": fin["w"], "dorsal_idx": (fin["tip"], fin["back"], fin["front"]), "dorsal_chord": fin["chord"],
+                "dorsal_front_base": fin.get("front_base", fin["front"])}
 
     def individual(self, ind):
         """Per-individual rig inputs (cached): rest positions per mesh (model frame) and joint offsets."""
@@ -281,7 +535,7 @@ class WhaleModel:
         if isinstance(ind, str):
             lib = getattr(self, "_library", None)
             if lib is None:
-                lib = self._library = indiv.load_library()
+                lib = self._library = indiv.load_library(self.library_path)
             if ind not in lib:
                 raise KeyError(f"unknown individual {ind!r}: run python3 -m factory.individuals")
             spec = lib[ind]
@@ -294,6 +548,13 @@ class WhaleModel:
         # vertices back to bind space through each vertex's exact blended skin matrix.
         joints = self.rig.joint_positions(None)
         regions = {**self.rig.pec_regions(), **self.dorsal_region()}
+        if getattr(self, "n_rig", None) is not None:
+            regions["dorsal_flatten"] = True          # round 7: the asset blade is pressed into the back under the parametric one
+        if getattr(self, "ridge_soften", 0.0) and "dorsal_idx" in regions:
+            # round 8: the ridge knobs between the fin and the flukes (rest frame of the rig, where the edits run)
+            rw = self.rig.pose(None, self.rig.mesh_index)
+            regions["ridge_soften"] = float(self.ridge_soften)
+            regions["ridge_x"] = (-480.0, float(rw[regions["dorsal_idx"][1], 0]) - 15.0)
         positions = {}
         for mi in range(len(self.rig.js["meshes"])):
             rest_world = self.rig.pose(None, mi)
@@ -314,7 +575,7 @@ class WhaleModel:
             from scipy import sparse
             regions = self.rig.pec_regions(); y = np.abs(self.rig.rest[:, 1])
             # the skin weights jump between neighbours at the armpit: smooth them over the mesh (1-ring mean, 6x)
-            F = self.faces; n = len(self.rig.rest)
+            F = self.faces[: getattr(self, "n_rig_faces", len(self.faces))]; n = len(self.rig.rest)
             E = np.concatenate([F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]])
             A = sparse.coo_matrix((np.ones(2 * len(E)), (np.r_[E[:, 0], E[:, 1]], np.r_[E[:, 1], E[:, 0]])), shape=(n, n)).tocsr()
             deg = np.asarray(A.sum(1)).ravel() + 1.0
@@ -327,17 +588,19 @@ class WhaleModel:
             self._pec_mem = mem
         return mem
 
-    def droop_pectorals(self, V: np.ndarray, jp: dict, droop_deg: float) -> np.ndarray:
+    def droop_pectorals(self, V: np.ndarray, jp: dict, droop_deg: float, side_deg=None) -> np.ndarray:
         """Swing both pectoral fins down by droop_deg (vertex level, membership-weighted) about a hinge along the
         body axis through each fin's root joint; V and jp in the same frame (rig frame, cm)."""
-        if abs(droop_deg) < 1e-6:
+        if abs(droop_deg) < 1e-6 and not side_deg:
             return V
         out = V.copy()
-        for side, root_name, sign in (("pec_left", "joint64_013", 1.0), ("pec_right", "joint70_019", -1.0)):
+        for k, (side, root_name, sign) in enumerate((("pec_left", "joint64_013", 1.0), ("pec_right", "joint70_019", -1.0))):
             w = self._pec_membership()[side]; idx = np.where(w > 1e-3)[0]
             if len(idx) == 0:
                 continue
-            root = np.asarray(jp[root_name]); ang = np.radians(sign * droop_deg) * w[idx]
+            # side_deg (run06 realism: one flipper raised for a slap): [left, right] added to the common droop
+            d = droop_deg + (float(side_deg[k]) if side_deg else 0.0)
+            root = np.asarray(jp[root_name]); ang = np.radians(sign * d) * w[idx]
             rel = out[idx] - root; c, s_ = np.cos(ang), np.sin(ang)
             y, z = rel[:, 1], rel[:, 2]                       # rotation about the x axis through the root
             out[idx, 1] = root[1] + c * y - s_ * z
@@ -384,9 +647,10 @@ class WhaleModel:
         if abs(curl_deg) < 1e-6:
             return V
         from factory.individuals import _smooth
-        w = _smooth(-self.canonical[:, 0], 380.0, 620.0)              # 0 on the tail stock, 1 on the blade (a 2.4 m hinge: a -95 curl without creasing)
+        C = self.canonical[: len(V)]                                    # (the rig's vertices; the parametric blade follows later)
+        w = _smooth(-C[:, 0], 380.0, 620.0)              # 0 on the tail stock, 1 on the blade (a 2.4 m hinge: a -95 curl without creasing)
         idx = np.where(w > 1e-3)[0]
-        hinge = V[(self.canonical[:, 0] > -530) & (self.canonical[:, 0] < -490)].mean(0)
+        hinge = V[(C[:, 0] > -530) & (C[:, 0] < -490)].mean(0)
         ang = np.radians(curl_deg) * w[idx]; c, s_ = np.cos(ang), np.sin(ang)
         rel = V[idx] - hinge; x, z = rel[:, 0], rel[:, 2]
         out = V.copy()
@@ -394,7 +658,7 @@ class WhaleModel:
         out[idx, 2] = hinge[2] - s_ * x + c * z
         return out
 
-    def clip_pose(self, t: float | None, ind=None, pec_droop_deg: float = 0.0, fluke_curl_deg: float = 0.0) -> np.ndarray:
+    def clip_pose(self, t: float | None, ind=None, pec_droop_deg: float = 0.0, fluke_curl_deg: float = 0.0, pec_side_deg=None) -> np.ndarray:
         """Clip frame t (None = rest) as a whale-frame mesh: root-relative, the front half levelled to the rest
         axis, scaled and centred like the rest pose (body then eyes); ``ind`` = an individual id / spec."""
         entry = self.individual(ind)
@@ -415,11 +679,11 @@ class WhaleModel:
             R = np.eye(3)
         root_rest = self.rig.joint_positions(None)["joint51_00"]
         out = (R @ (allv - jp["joint51_00"]).T).T + root_rest
-        if pec_droop_deg:
+        if pec_droop_deg or pec_side_deg:
             # the fins swing about the body axis: do it in the levelled frame (the clip's heading and root motion
             # would otherwise tilt the hinge), with the fin root joints carried into that frame
             jp_lev = {k: R @ (np.asarray(v) - jp["joint51_00"]) + root_rest for k, v in jp.items()}
-            out = self.droop_pectorals(out, jp_lev, pec_droop_deg)
+            out = self.droop_pectorals(out, jp_lev, pec_droop_deg, pec_side_deg)
         if fluke_curl_deg:
             out = self.curl_fluke(out, fluke_curl_deg)
         return out * self.length_scale - self.centre
@@ -445,7 +709,7 @@ class WhaleModel:
         some clip frames. Edges under 8 cm at rest that stretch past 2x are closed to their midpoint."""
         tiny = self.__dict__.get("_tiny_edges")
         if tiny is None:
-            F = self.faces
+            F = self.faces[: getattr(self, "n_rig_faces", len(self.faces))]
             E = np.unique(np.sort(np.concatenate([F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]]), axis=1), axis=0)
             L0 = np.linalg.norm(self.rest[E[:, 0]] - self.rest[E[:, 1]], axis=1)
             keep = (L0 > 0.5) & (L0 < 8.0)
@@ -462,6 +726,14 @@ class WhaleModel:
         return V
 
     def posed(self, shot: dict) -> np.ndarray:
+        """The shot's whale in its own frame (before the rigid placement): body scale, clip bend, fins (and, with the
+        parametric blade, the individual's blade carried by the back)."""
+        V = self._posed_rig(shot)
+        if getattr(self, "n_rig", None) is not None and self.kind == "humpback4k":
+            V = np.concatenate([V[: self.n_rig], self._blade_posed(V[: self.n_rig], shot.get("individual"), float(shot.get("body_scale", 1.0)))])
+        return V
+
+    def _posed_rig(self, shot: dict) -> np.ndarray:
         """The shot's whale in its own frame (before the rigid placement): body scale, clip bend, fins."""
         scale = float(shot.get("body_scale", 1.0))
         params = deform.DeformParams(**shot["deform"]) if shot.get("deform") else deform.DeformParams()
@@ -474,7 +746,9 @@ class WhaleModel:
         t = (shot.get("pose") or {}).get("clip_t")
         ind = shot.get("individual")
         droop = float(shot.get("pec_droop_deg") or 0.0); curl = float(shot.get("fluke_curl_deg") or 0.0)
-        base = (self.clip_pose(float(t) if t is not None else None, ind, droop, curl) if (t is not None or ind or droop or curl) else self.rest.copy())
+        side = shot.get("pec_side_deg")            # run06 realism only: [left, right] extra flipper angle
+        base = (self.clip_pose(float(t) if t is not None else None, ind, droop, curl, side) if (t is not None or ind or droop or curl or side)
+                else self.rest[: getattr(self, "n_rig", len(self.rest))].copy())
         base = self._stitch(base) * scale
         # the clip bends the body; keep only the fin parameters of the procedural deformation
         if (shot.get("pose") or {}).get("bend") == "procedural":
@@ -516,22 +790,151 @@ class WhaleModel:
             for prefix in ("fin_te", "fin_le"):
                 for k, i in enumerate(fin[prefix]):
                     idx[f"{prefix}_{k:02d}"] = [int(j) for j in i] if isinstance(i, list) else int(i)   # a pair = the edge's midpoint
+        if getattr(self, "n_rig", None) is not None:
+            # run06 round 7: the fin landmarks on the parametric blade: tip, the trailing edge's foot (back base), the
+            # leading edge's foot (front base = where the hump's slope leaves the back line), and the edge chains on
+            # the blade's right flank from the foot (h 0.1) to the top
+            from factory import blade as bl
+            lm, n0, R2 = self._blade_local_lm, self.n_rig, 2 * bl.NC
+            idx = {k: v for k, v in idx.items() if not k.startswith(("fin_te_", "fin_le_"))}
+            idx["dorsal_fin_tip"], idx["dorsal_fin_back"], idx["dorsal_fin_front"] = n0 + lm["tip"], n0 + lm["back_base"], n0 + lm["front_base"]
+            k1 = int(np.argmin(np.abs(bl.LEVELS - 0.1)))
+            ks = [int(round(v)) for v in np.linspace(bl.NL - 1, k1, 10)]    # 10 levels whatever the blade's resolution
+            for j, k in enumerate(ks):                                       # tip -> foot, like the asset chains
+                idx[f"fin_te_{j:02d}"] = n0 + k * R2 + 0
+                idx[f"fin_le_{j:02d}"] = n0 + k * R2 + bl.NC - 1
+        if getattr(self, "landmarks_v2", False):
+            # run06 round 5 (config whale.landmarks_v2): fluke_notch on the midline (|y| < 3 cm; the |y| < 30 cm pick sat
+            # ~25 cm off it), and tail_stock_top = the top of the tail stock at the fluke insertion (the researcher's click,
+            # just ahead of the notch: on the midline, a third of the way from the notch to the stock's narrowest point)
+            R = self.rest; x, y, z = R[:, 0], R[:, 1], R[:, 2]
+            mid = np.abs(y) < 3.0
+            tail = x < x.min() + 0.15 * (x.max() - x.min())
+            sel = np.nonzero(mid & tail)[0]
+            if len(sel):
+                notch = int(sel[np.argmin(x[sel])]); idx["fluke_notch"] = notch
+                se = idx.get("spine_end")
+                if se is not None:
+                    xs = float(R[se].mean(0)[0] if isinstance(se, list) else R[se][0])
+                    xi = x[notch] + (xs - x[notch]) / 3.0
+                    band = np.nonzero(mid & (np.abs(x - xi) < 4.0))[0]
+                    if len(band):
+                        idx["tail_stock_top"] = int(band[np.argmax(z[band])])
         return {k: v for k, v in idx.items() if v is not None}
+
+    def part_groups(self) -> dict:
+        """The run06 per-pixel part taxonomy as vertex groups on the rig's own rest mesh (self.rest, project frame), so it
+        is exact for every individual and pose (vertex i stays canonical vertex i) and identical across animals. PART_IDS
+        order; a vertex belongs to one group, "body" is all the rest:
+          fluke     behind the narrowest point of the tail stock (the spine_end landmark's x): both blades
+          dorsal    the fin blade with its hump: between the back base (dorsal_fin_back) and the front base
+                    (dorsal_fin_front, the researcher's fin front), above the base line between the two minus
+                    DORSAL_HUMP_DEPTH_CM, within DORSAL_HUMP_HALF_WIDTH_CM of the midline
+          pectoral  the smoothed pectoral membership (> 0.5) that pec_droop_deg swings
+          head      ahead of a cross plane HEAD_BEHIND_BLOWHOLE_CM behind the blowhole (the blowhole, eyes, jaw hinge
+                    and rostrum lie on it), pectorals excluded
+        Returns {name: vertex indices}; cached. Empty for the static K9239 model."""
+        cached = self.__dict__.get("_part_groups")
+        if cached is not None:
+            return cached
+        out: dict = {}
+        if self.kind == "humpback4k":
+            R = self.rest; x, y, z = R[:, 0], R[:, 1], R[:, 2]
+            idx = self.landmark_indices()
+
+            def at(name):
+                v = idx[name]
+                return R[v].mean(0) if isinstance(v, list) else R[v]
+            fluke = x < at("spine_end")[0]
+            back, front = at("dorsal_fin_back"), at("dorsal_fin_front")
+            base = back[2] + (x - back[0]) * (front[2] - back[2]) / max(front[0] - back[0], 1e-6)
+            dorsal = (x >= back[0] - 1.0) & (x <= front[0] + 1.0) & (np.abs(y) < DORSAL_HUMP_HALF_WIDTH_CM) & (z > base - DORSAL_HUMP_DEPTH_CM)
+            mem = self._pec_membership()
+            pad = len(R) - len(mem["pec_left"])                        # the parametric blade's vertices: never pectoral
+            pec = np.concatenate([(mem["pec_left"] > 0.5) | (mem["pec_right"] > 0.5), np.zeros(max(pad, 0), bool)])
+            head = (x >= at("blowhole")[0] - HEAD_BEHIND_BLOWHOLE_CM) & ~pec
+            taken = np.zeros(len(R), bool)
+            for name, sel in (("fluke", fluke), ("dorsal", dorsal), ("pectoral", pec), ("head", head)):
+                sel = sel & ~taken; taken |= sel
+                out[name] = np.nonzero(sel)[0]
+            out["body"] = np.nonzero(~taken)[0]
+            if getattr(self, "n_rig", None) is not None:              # the blade is dorsal fin, whole
+                bl_idx = np.arange(self.n_rig, len(R))
+                for k in list(out):
+                    out[k] = np.setdiff1d(out[k], bl_idx)
+                out["dorsal"] = np.union1d(out["dorsal"], bl_idx)
+        self._part_groups = out
+        return out
+
+    def vertex_part_ids(self) -> np.ndarray | None:
+        """(N,) uint8 PART_IDS per vertex (part_groups), None for the static model."""
+        groups = self.part_groups()
+        if not groups:
+            return None
+        ids = np.zeros(len(self.rest), np.uint8)
+        for name, sel in groups.items():
+            ids[sel] = PART_IDS[name]
+        return ids
 
     def write_obj(self, vertices: np.ndarray, path: Path, comment: str = "posed whale") -> None:
         """Posed OBJ with the model's groups (body, eye...) for the renderer."""
         from factory.humpback4k import write_obj as _w
         groups = []
         uv = self._uv()
-        for name, idx in self.groups.items():
+        items = dict(self.groups)
+        if getattr(self, "n_rig", None) is not None and "blade" in items and "body" in items and len(items["body"]):
+            # round 8: the blade is written in the body's group (one material slot), so it gets the same skin material and
+            # values as the back; the indices are contiguous (body 0..n_rig-1, blade n_rig..)
+            blade = items.pop("blade")
+            if int(items["body"].max()) + 1 == int(blade.min()):
+                items["body"] = np.concatenate([items["body"], blade])
+            else:
+                items["blade"] = blade
+        for name, idx in items.items():
             if len(idx) == 0:
                 continue
             lo, hi = int(idx.min()), int(idx.max()) + 1
             fmask = (self.faces[:, 0] >= lo) & (self.faces[:, 0] < hi)
-            groups.append((name, vertices[lo:hi], self.faces[fmask] - lo, uv[lo:hi]))
+            g = (name, vertices[lo:hi], self.faces[fmask] - lo, uv[lo:hi])
+            if getattr(self, "n_rig", None) is not None and name == "body" and hi > self.n_rig:
+                g = g + (self._smooth_normals(vertices[lo:hi], self.faces[fmask] - lo, self.n_rig - lo),)
+            groups.append(g)
         _w(Path(path), groups, comment)
+
+    def _smooth_normals(self, V: np.ndarray, F: np.ndarray, n_body: int) -> np.ndarray:
+        """round 8: area-weighted vertex normals (outward) for the body + blade group, the blade's lowest rings blended into
+        the normals of the back beside them, so the blade shades as one smooth surface with the hump (no crease)."""
+        from factory import blade as bl
+        V = np.asarray(V, float)
+        tri = V[F]
+        fn = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+        if (np.einsum("ij,ij->i", fn, tri.mean(1) - V.mean(0)) < 0).mean() > 0.5:
+            fn = -fn
+        N = np.zeros_like(V)
+        for k in range(3):
+            np.add.at(N, F[:, k], fn)
+        # weld coincident vertices (UV seams split them) so the normals are smooth across the seams, as the importer's are
+        _, inv = np.unique(np.round(V, 2), axis=0, return_inverse=True)
+        inv = inv.ravel()
+        acc = np.zeros((int(inv.max()) + 1, 3)); np.add.at(acc, inv, N); N = acc[inv]
+        N /= np.linalg.norm(N, axis=1, keepdims=True) + 1e-12
+        nb = len(V) - n_body
+        if nb > 0:
+            k = np.arange(nb) // (2 * bl.NC)
+            lev = np.where(np.arange(nb) < nb - 1, bl.LEVELS[np.minimum(k, bl.NL - 1)], 1.0)
+            w = np.clip((0.05 - lev) / 0.2, 0.0, 1.0)       # only at and under the join
+            sel = np.nonzero(w > 0)[0]
+            if len(sel):
+                Bv = V[n_body + sel]
+                near = np.nonzero(np.linalg.norm(V[:n_body] - Bv.mean(0), axis=1) < 400.0)[0]
+                if len(near):
+                    d = ((Bv[:, None, :] - V[near][None, :, :]) ** 2).sum(-1)
+                    nn = near[np.argmin(d, axis=1)]
+                    mix = N[n_body + sel] * (1 - w[sel, None]) + N[nn] * w[sel, None]
+                    N[n_body + sel] = mix / (np.linalg.norm(mix, axis=1, keepdims=True) + 1e-12)
+        return N
 
     def _uv(self) -> np.ndarray:
         if self.kind == "humpback4k":
-            return self.rig.uv
+            return np.concatenate([self.rig.uv, self._blade_uv]) if getattr(self, "n_rig", None) is not None else self.rig.uv
         raise NotImplementedError

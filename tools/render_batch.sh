@@ -25,6 +25,15 @@ for batch in "$@"; do
         echo "=== $name already rendered, skipping"
         continue
     fi
+    # WF_MIN_GPU_FREE_MIB (default unset: no wait): wait until this much GPU memory is free before the batch (a shared GPU)
+    if [ -n "${WF_MIN_GPU_FREE_MIB:-}" ]; then
+        while :; do
+            free=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | head -1)
+            [ "${free:-0}" -ge "$WF_MIN_GPU_FREE_MIB" ] && break
+            echo "render_batch: $name waits: ${free} MiB GPU free < ${WF_MIN_GPU_FREE_MIB}" >&2
+            sleep 60
+        done
+    fi
     echo "=== $name ==="
     # Deformed whale meshes for this batch (factory/deform.py), kept only while it renders.
     mesh_dir="$run_dir/whales/$name"
@@ -62,4 +71,6 @@ for batch in "$@"; do
     done
     rm -rf -- "$mesh_dir"
     date -u +%FT%TZ > "$out_dir/done"
+    # frugal storage (config storage.raw_frames = "last"): drop the warm-up frames once the kept ones are verified
+    wf_python -m factory.storage prune-raw "$run_dir" "$name" || true
 done

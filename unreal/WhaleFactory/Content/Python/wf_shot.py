@@ -34,7 +34,21 @@ WHALE_VARIANT_PREFIX = "WhaleVar_"
 WHALE_MESH_DIR = "/Game/ThirdParty/Humpback/Gen"   # per-shot deformed whale meshes (gitignored)
 HUMPBACK_DIR = "/Game/ThirdParty/Humpback"
 WHALE_STENCIL = 1
-COMPANION_STENCIL = 3        # a second whale in the shot (mom + calf): 0.6 in the label pass
+COMPANION_STENCIL = 3        # a second whale in the shot (run04 / run05 mom + calf): instance 2 in the label pass
+ANIMAL_STENCIL_BASE = 16     # run06 scenes: further whale with instance id k (2..7) renders with custom stencil 16 + k
+# The run06 instance label pass (wf_make_instance_labels: M_WhaleInstanceMask, render configs MRQ_BatchInst*) sees these
+# stencils; the legacy M_WhaleVisibleMask sees 1 and 3 only.
+
+
+def further_animals(shot: dict) -> list:
+    """[(instance id, animal dict, custom stencil, actor label suffix)] of a shot's whales other than its own: run06
+    "companions" (stencil 16 + id) or the run04 / run05 "companion" (stencil 3, label suffix "c" as before)."""
+    if shot.get("companions"):
+        return [(int(c.get("instance_id", k + 2)), c, ANIMAL_STENCIL_BASE + int(c.get("instance_id", k + 2)), f"a{int(c.get('instance_id', k + 2))}")
+                for k, c in enumerate(shot["companions"])]
+    if shot.get("companion"):
+        return [(2, shot["companion"], COMPANION_STENCIL, "c")]
+    return []
 CAMERA_LABEL = "BoatCamera"
 SUN_LABEL = "Sun"
 FOG_LABEL = "HeightFog"
@@ -46,6 +60,8 @@ SPLASH_MESH_DIR = f"{SPRAY_DIR}/Gen"  # imported per-shot splash meshes (gitigno
 SPRAY_MATERIAL = f"{SPRAY_DIR}/M_Splash"
 SPRAY_COVERAGE_MATERIAL = f"{SPRAY_DIR}/M_SplashCoverage"
 SPRAY_LABEL_PREFIX = "Spray_"
+SPRAY_SOFT_MATERIAL = f"{SPRAY_DIR}/M_SplashSoft"                 # run06 realism (wf_make_soft_splash): shaded, eroded
+SPRAY_SOFT_COVERAGE_MATERIAL = f"{SPRAY_DIR}/M_SplashSoftCoverage"
 SPRAY_STENCIL = 2
 SPRAY_COVERAGE_ALPHA = 0.35  # splash alpha above which white water counts as hiding the whale
 MESH_IMPORT_PIPELINE = "/Game/WhaleFactory/Import/IP_StaticMeshNoNanite"
@@ -156,6 +172,13 @@ def apply_camera(camera: unreal.Actor, spec: dict) -> None:
         cine.set_editor_property("current_focal_length", float(spec["focal_mm"]))
 
 
+# Ocean scalars that run06 realism batches change; every batch that does not set them gets these (MI_OceanDeep as built),
+# since the material instance is saved and would otherwise carry one batch's values into the next.
+OCEAN_SCALAR_DEFAULTS = {"Water Specular": 0.225, "Water Fresnel Specular": 0.225,
+                         # run06 realism round 2 (reflection blur, ripple size): the plugin material's own values
+                         "Water Fresnel Roughness": 0.1, "Default Near Water Scale": 512.0}
+
+
 def apply_ocean_look(spec: dict, instance_path: str = OCEAN_MATERIAL_INSTANCE) -> None:
     """Set parameters on the ocean's material instance (made by wf_build_scene)."""
     instance = unreal.EditorAssetLibrary.load_asset(instance_path)
@@ -174,7 +197,7 @@ def apply_ocean_look(spec: dict, instance_path: str = OCEAN_MATERIAL_INSTANCE) -
         unknown = sorted(set(spec.get(kind, {})) - known[kind])
         if unknown:
             log(f"warning: {kind} not on the ocean material, ignored: {unknown}")
-    for name, value in spec.get("scalars", {}).items():
+    for name, value in (OCEAN_SCALAR_DEFAULTS | spec.get("scalars", {})).items():
         mel.set_material_instance_scalar_parameter_value(instance, name, float(value))
     for name, value in spec.get("vectors", {}).items():
         mel.set_material_instance_vector_parameter_value(instance, name, unreal.LinearColor(*[float(v) for v in value]))
@@ -453,6 +476,116 @@ def apply_islands(specs: list | None) -> list:
     return actors
 
 
+# The sky atmosphere as built (OceanPOC); a batch without an "atmosphere" section is rendered with exactly these.
+ATMOSPHERE_DEFAULTS = {"rayleigh_scattering_scale": 0.0331, "mie_scattering_scale": 0.003996, "mie_absorption_scale": 0.000444,
+                       "multi_scattering_factor": 1.0}
+
+
+def apply_atmosphere(spec: dict | None) -> dict:
+    """run06 realism: the batch's sky atmosphere (a bluer, less hazy midday sky); every key not given, and every batch
+    without the section, gets ATMOSPHERE_DEFAULTS (the level is saved after each batch, so nothing may persist)."""
+    actor = find_actor("SkyAtmosphere")
+    comp = actor.get_component_by_class(unreal.SkyAtmosphereComponent)
+    applied = {}
+    for key, default in ATMOSPHERE_DEFAULTS.items():
+        value = float((spec or {}).get(key, default))
+        comp.set_editor_property(key, value)
+        applied[key] = value
+    lum = list((spec or {}).get("sky_luminance_factor", [1.0, 1.0, 1.0]))       # a darker / bluer sky (and its reflection)
+    comp.set_editor_property("sky_luminance_factor", unreal.LinearColor(float(lum[0]), float(lum[1]), float(lum[2]), 1.0))
+    applied["sky_luminance_factor"] = lum
+    if spec:
+        log(f"atmosphere {applied}")
+    return applied
+
+
+def apply_grade(cine, spec: dict | None) -> None:
+    """run06 realism: the camera's picture style (white balance, saturation, contrast) on the cine camera's post-process
+    settings; a batch without it gets every override switched off (the level is saved after each batch)."""
+    post = cine.get_editor_property("post_process_settings")
+    spec = spec or {}
+    for key, prop, kind in (("white_temp", "white_temp", float), ("white_tint", "white_tint", float),
+                            ("saturation", "color_saturation", "v4"), ("contrast", "color_contrast", "v4"), ("gamma", "color_gamma", "v4"),
+                            ("film_shoulder", "film_shoulder", float), ("film_white_clip", "film_white_clip", float),
+                            # run06 realism round 2: lens vignette (the engine's 0.4 default darkens the corners far more
+                            # than the field photos), less saturation in the shadows (dark skin stays grey, not royal
+                            # blue), no colour fringe
+                            ("vignette", "vignette_intensity", float), ("saturation_shadows", "color_saturation_shadows", "v4"),
+                            ("fringe", "scene_fringe_intensity", float)):
+        on = key in spec
+        post.set_editor_property(f"override_{prop}", on)
+        if on:
+            value = spec[key]
+            if kind == "v4":
+                v = value if isinstance(value, (list, tuple)) else [value, value, value]
+                post.set_editor_property(prop, unreal.Vector4(float(v[0]), float(v[1]), float(v[2]), 1.0))
+            else:
+                post.set_editor_property(prop, float(value))
+    cine.set_editor_property("post_process_settings", post)
+    if spec:
+        log(f"grade {spec}")
+
+
+FOG_DEFAULTS_FILE = PROJECT_DIR / "Saved" / "wf_fog_defaults.json"
+FOG_PROPS = {"inscattering": ("fog_inscattering_luminance", "color"), "start_distance": ("start_distance", float),
+             "height_falloff": ("fog_height_falloff", float), "max_opacity": ("fog_max_opacity", float),
+             "directional_inscattering": ("directional_inscattering_luminance", "color"),
+             "directional_exponent": ("directional_inscattering_exponent", float)}
+
+
+def _fog_value(comp, prop, kind):
+    v = comp.get_editor_property(prop)
+    return [v.r, v.g, v.b] if kind == "color" else float(v)
+
+
+def apply_fog_batch(spec: dict | None) -> dict:
+    """run06 realism round 2: the batch's height-fog look (a hazy horizon: in-scattering colour, start distance, falloff);
+    every property not given gets the level's as-built value, recorded once in Saved/wf_fog_defaults.json before the
+    first change (the level is saved after each batch, so nothing may persist). Density stays per shot."""
+    comp = find_actor(FOG_LABEL).get_component_by_class(unreal.ExponentialHeightFogComponent)
+    if FOG_DEFAULTS_FILE.exists():
+        defaults = json.loads(FOG_DEFAULTS_FILE.read_text())
+    else:
+        if not spec:
+            return {}
+        defaults = {}
+        for k, (p, kind) in FOG_PROPS.items():
+            try:
+                defaults[k] = _fog_value(comp, p, kind)
+            except Exception as exc:
+                log(f"fog property {p} not readable: {exc}")
+        FOG_DEFAULTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        FOG_DEFAULTS_FILE.write_text(json.dumps(defaults))
+        log(f"fog defaults recorded {defaults}")
+    applied = {}
+    for key, (prop, kind) in FOG_PROPS.items():
+        if key not in defaults:
+            continue
+        value = (spec or {}).get(key, defaults[key])
+        comp.set_editor_property(prop, unreal.LinearColor(float(value[0]), float(value[1]), float(value[2]), 1.0) if kind == "color" else float(value))
+        applied[key] = value
+    if spec:
+        log(f"fog look {applied}")
+    return applied
+
+
+def apply_clouds(spec) -> None:
+    """run06 realism round 2: batch["clouds"] == "off" hides the volumetric clouds (a hazy sky without towering cumulus);
+    hide_all_skies() shows them again for every other batch."""
+    if spec == "off":
+        for a in atmosphere_actors():
+            if a.get_actor_label() == "Clouds":
+                a.set_actor_hidden_in_game(True)
+        log("clouds off")
+
+
+def apply_sky_light(spec: dict | None) -> None:
+    """run06 realism: the sky light's intensity (fill on the shaded side of the whale); 1.0 (as built) otherwise."""
+    actor = find_actor("SkyLight")
+    comp = actor.get_component_by_class(unreal.SkyLightComponent)
+    comp.set_editor_property("intensity", float((spec or {}).get("sky_light_intensity", 1.0)))
+
+
 def apply_sun(spec: dict) -> None:
     sun = find_actor(SUN_LABEL)
     rotation = sun.get_actor_rotation()
@@ -618,6 +751,28 @@ def ensure_whitewater_materials(rebuild: bool = False) -> None:
     os.environ.pop("WF_REBUILD_WW_MATERIALS", None)
 
 
+def foam_opacity_instances(opacity: float) -> tuple:
+    """run06 realism round 2: MI_Foam_o<NN> / MI_FoamCoverage_o<NN>, instances of M_Foam / M_FoamCoverage with the Opacity
+    scalar set (the visible foam and its label twin stay the same shape; below FOAM_COVERAGE_ALPHA / 0.95 the foam never
+    hides the whale in the labels). Made once per value; the materials themselves are unchanged."""
+    ensure_whitewater_materials()
+    tag = f"o{int(round(opacity * 100)):02d}"
+    paths = []
+    for parent in (FOAM_MATERIAL, FOAM_COVERAGE_MATERIAL):
+        name = f"MI_{parent.rsplit('/', 1)[1][2:]}_{tag}"
+        path = f"{SPRAY_DIR}/{name}"
+        if not unreal.EditorAssetLibrary.does_asset_exist(path):
+            tools = unreal.AssetToolsHelpers.get_asset_tools()
+            mi = tools.create_asset(name, SPRAY_DIR, unreal.MaterialInstanceConstant, unreal.MaterialInstanceConstantFactoryNew())
+            unreal.MaterialEditingLibrary.set_material_instance_parent(mi, unreal.EditorAssetLibrary.load_asset(parent))
+            unreal.MaterialEditingLibrary.set_material_instance_scalar_parameter_value(mi, "Opacity", float(opacity))
+            unreal.MaterialEditingLibrary.update_material_instance(mi)
+            unreal.EditorAssetLibrary.save_asset(path, only_if_is_dirty=False)
+            log(f"made {name}")
+        paths.append(path)
+    return tuple(paths)
+
+
 def apply_whitewater(spec: dict | None, label: str = "shot", hidden: bool = False) -> list:
     """Import a shot's white-water meshes: the foam carpet (visible + coverage twin, like a splash)
     and the aerated-water cloud (visible only; it is under the surface). Returns the actors."""
@@ -626,7 +781,14 @@ def apply_whitewater(spec: dict | None, label: str = "shot", hidden: bool = Fals
     ensure_whitewater_materials()
     subsystem = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
     actors = []
-    parts = [("foam", spec["mesh_obj"], FOAM_MATERIAL, False), ("foamc", spec["mesh_obj"], FOAM_COVERAGE_MATERIAL, True)]
+    foam, foamc = FOAM_MATERIAL, FOAM_COVERAGE_MATERIAL
+    opacity = spec.get("foam_opacity")
+    if opacity is not None:                     # run06 realism round 2: thinner foam (instances of both twins, same opacity)
+        foam, _ = foam_opacity_instances(float(opacity))
+        # round 5: the label twin keeps the base coverage material, so dense foam cores hide the whale in the labels
+        # however thin the visible foam is drawn (a thin visible foam with a twin of the same opacity never covered,
+        # and white foam lying on the whale was counted as whale skin)
+    parts = [("foam", spec["mesh_obj"], foam, False), ("foamc", spec["mesh_obj"], foamc, True)]
     if spec.get("churn_obj"):
         parts.append(("churn", spec["churn_obj"], CHURN_MATERIAL, False))
     meshes = {}
@@ -658,15 +820,35 @@ def apply_whitewater(spec: dict | None, label: str = "shot", hidden: bool = Fals
     return actors
 
 
+def opacity_instance(material, opacity: float):
+    """run06 realism round 3: MI_<material>_o<NN>, an instance of a splash material with its Opacity scalar set (made once)."""
+    base = material.get_path_name().split(".")[0]
+    folder, name = base.rsplit("/", 1)
+    mi_name = f"MI_{name[2:] if name.startswith('M_') else name}_o{int(round(opacity * 100)):02d}"
+    path = f"{folder}/{mi_name}"
+    if not unreal.EditorAssetLibrary.does_asset_exist(path):
+        tools = unreal.AssetToolsHelpers.get_asset_tools()
+        mi = tools.create_asset(mi_name, folder, unreal.MaterialInstanceConstant, unreal.MaterialInstanceConstantFactoryNew())
+        unreal.MaterialEditingLibrary.set_material_instance_parent(mi, material)
+        unreal.MaterialEditingLibrary.set_material_instance_scalar_parameter_value(mi, "Opacity", float(opacity))
+        unreal.MaterialEditingLibrary.update_material_instance(mi)
+        unreal.EditorAssetLibrary.save_asset(path, only_if_is_dirty=False)
+        log(f"made {mi_name}")
+    return unreal.EditorAssetLibrary.load_asset(path)
+
+
 def apply_splash(spec: dict | None, label: str = "shot", hidden: bool = False) -> list:
     """Import the shot's splash mesh and spawn it twice: visible (M_Splash) and the hidden
     coverage twin (M_SplashCoverage, custom depth only). Returns the two actors."""
     if not spec or not spec.get("mesh_obj"):
         return []
-    visible = unreal.EditorAssetLibrary.load_asset(SPRAY_MATERIAL)
-    coverage = unreal.EditorAssetLibrary.load_asset(SPRAY_COVERAGE_MATERIAL)
+    soft = spec.get("style") == "soft" and unreal.EditorAssetLibrary.does_asset_exist(SPRAY_SOFT_MATERIAL)   # run06 realism
+    visible = unreal.EditorAssetLibrary.load_asset(SPRAY_SOFT_MATERIAL if soft else SPRAY_MATERIAL)
+    coverage = unreal.EditorAssetLibrary.load_asset(SPRAY_SOFT_COVERAGE_MATERIAL if soft else SPRAY_COVERAGE_MATERIAL)
     if visible is None or coverage is None:
         raise RuntimeError("splash materials missing; run tools/run_editor_script.sh build_scene first")
+    if spec.get("opacity") is not None:          # run06 realism round 3: see-through visible splash (strands); label twin unchanged
+        visible = opacity_instance(visible, float(spec["opacity"]))
     mesh = import_asset(spec["mesh_obj"], SPLASH_MESH_DIR, f"SM_Splash_{label}", options=mesh_import_options())
     if not isinstance(mesh, unreal.StaticMesh):
         raise RuntimeError(f"splash mesh import failed for {spec['mesh_obj']}: {mesh!r}")
@@ -733,6 +915,7 @@ def ensure_humpback4k_materials() -> dict:
     # import stamp: the source textures' mtimes; a change (new skins, new individuals) rebuilds everything
     sources = sorted(list(HUMPBACK4K_SRC.glob("T_Humpback4k_*.png")) + list(HUMPBACK4K_SKINS.glob("T_Humpback_BaseColor_*.png")))
     stamp = {str(f): f.stat().st_mtime for f in sources}
+    stamp["_graph"] = 2          # round 3: BaseColorScale / Specular parameters (a graph change rebuilds the assets once)
     stamp_file = PROJECT_DIR / "Saved" / "wf_humpback4k_import.json"
     previous = json.loads(stamp_file.read_text()) if stamp_file.exists() else None
     if previous == stamp and unreal.EditorAssetLibrary.does_asset_exist(skin_path) and unreal.EditorAssetLibrary.does_asset_exist(eye_path):
@@ -756,7 +939,19 @@ def ensure_humpback4k_materials() -> dict:
     base.set_editor_property("parameter_name", "BaseColor")
     base.set_editor_property("texture", base_tex)
     base.set_editor_property("sampler_type", unreal.MaterialSamplerType.SAMPLERTYPE_COLOR)
-    mel.connect_material_property(base, "RGB", unreal.MaterialProperty.MP_BASE_COLOR)
+    # run06 realism round 3: BaseColorScale (albedo multiplier) and Specular (the engine's 0.5 default), both keyed per
+    # whale actor by wf_build_batch when a batch has "skin_look"; at their defaults the skin renders exactly as before
+    base_scale = mel.create_material_expression(skin, unreal.MaterialExpressionScalarParameter, -500, -350)
+    base_scale.set_editor_property("parameter_name", "BaseColorScale")
+    base_scale.set_editor_property("default_value", 1.0)
+    base_mult = mel.create_material_expression(skin, unreal.MaterialExpressionMultiply, -250, -250)
+    mel.connect_material_expressions(base, "RGB", base_mult, "A")
+    mel.connect_material_expressions(base_scale, "", base_mult, "B")
+    mel.connect_material_property(base_mult, "", unreal.MaterialProperty.MP_BASE_COLOR)
+    spec = mel.create_material_expression(skin, unreal.MaterialExpressionScalarParameter, -250, 50)
+    spec.set_editor_property("parameter_name", "Specular")
+    spec.set_editor_property("default_value", 0.5)
+    mel.connect_material_property(spec, "", unreal.MaterialProperty.MP_SPECULAR)
     rough = mel.create_material_expression(skin, unreal.MaterialExpressionTextureSample, -700, 100)
     rough.set_editor_property("texture", rough_tex)
     rough.set_editor_property("sampler_type", unreal.MaterialSamplerType.SAMPLERTYPE_LINEAR_GRAYSCALE)
@@ -821,7 +1016,80 @@ def clear_whale_variants() -> None:
         log(f"removed {len(old)} whale variants")
 
 
-def spawn_whale_variant(shot: dict, label: str, hidden: bool = False, stencil: int = WHALE_STENCIL) -> unreal.Actor:
+SKIN_BAKE_MATERIAL = f"{HUMPBACK4K_DIR}/M_Humpback4kSkinBake_v1"
+
+
+def ensure_skin_bake_material():
+    """run06 round 8: a skin graph whose roughness is set directly (RoughnessBase + texture * RoughnessTex) instead of the
+    asset's near-zero roughness map times a scale (a mirror-like skin that shows the sky as a pale sheen), with
+    BaseColorScale and Specular. Its values are baked into material instance assets per skin and wetness step
+    (skin_bake_instance) and assigned when the whale actor is spawned: the per-actor sequencer material keys
+    (wf_build_batch.key_wetness, bound to the mesh component without its actor) never reached the render."""
+    if unreal.EditorAssetLibrary.does_asset_exist(SKIN_BAKE_MATERIAL):
+        return unreal.EditorAssetLibrary.load_asset(SKIN_BAKE_MATERIAL)
+    ensure_humpback4k_materials()
+    mel = unreal.MaterialEditingLibrary
+    tools = unreal.AssetToolsHelpers.get_asset_tools()
+    rough_tex = unreal.EditorAssetLibrary.load_asset(f"{HUMPBACK4K_DIR}/T_Humpback4k_Roughness")
+    normal_tex = unreal.EditorAssetLibrary.load_asset(f"{HUMPBACK4K_DIR}/T_Humpback4k_Normal")
+    base_tex = unreal.EditorAssetLibrary.load_asset(f"{HUMPBACK4K_DIR}/T_Humpback4k_BaseColor")
+    mat = tools.create_asset(SKIN_BAKE_MATERIAL.rsplit("/", 1)[1], HUMPBACK4K_DIR, unreal.Material, unreal.MaterialFactoryNew())
+
+    def scalar(name, default, x, y):
+        e = mel.create_material_expression(mat, unreal.MaterialExpressionScalarParameter, x, y)
+        e.set_editor_property("parameter_name", name); e.set_editor_property("default_value", float(default))
+        return e
+    base = mel.create_material_expression(mat, unreal.MaterialExpressionTextureSampleParameter2D, -600, -250)
+    base.set_editor_property("parameter_name", "BaseColor"); base.set_editor_property("texture", base_tex)
+    base.set_editor_property("sampler_type", unreal.MaterialSamplerType.SAMPLERTYPE_COLOR)
+    bmul = mel.create_material_expression(mat, unreal.MaterialExpressionMultiply, -300, -250)
+    mel.connect_material_expressions(base, "RGB", bmul, "A"); mel.connect_material_expressions(scalar("BaseColorScale", 1.0, -600, -400), "", bmul, "B")
+    mel.connect_material_property(bmul, "", unreal.MaterialProperty.MP_BASE_COLOR)
+    mel.connect_material_property(scalar("Specular", 0.5, -300, 0), "", unreal.MaterialProperty.MP_SPECULAR)
+    rough = mel.create_material_expression(mat, unreal.MaterialExpressionTextureSample, -900, 150)
+    rough.set_editor_property("texture", rough_tex)
+    rough.set_editor_property("sampler_type", unreal.MaterialSamplerType.SAMPLERTYPE_LINEAR_GRAYSCALE)
+    rmul = mel.create_material_expression(mat, unreal.MaterialExpressionMultiply, -600, 150)
+    mel.connect_material_expressions(rough, "R", rmul, "A"); mel.connect_material_expressions(scalar("RoughnessTex", 0.15, -900, 350), "", rmul, "B")
+    radd = mel.create_material_expression(mat, unreal.MaterialExpressionAdd, -400, 150)
+    mel.connect_material_expressions(rmul, "", radd, "A"); mel.connect_material_expressions(scalar("RoughnessBase", 0.35, -600, 350), "", radd, "B")
+    mel.connect_material_property(radd, "", unreal.MaterialProperty.MP_ROUGHNESS)
+    normal = mel.create_material_expression(mat, unreal.MaterialExpressionTextureSample, -600, 500)
+    normal.set_editor_property("texture", normal_tex)
+    normal.set_editor_property("sampler_type", unreal.MaterialSamplerType.SAMPLERTYPE_NORMAL)
+    mel.connect_material_property(normal, "RGB", unreal.MaterialProperty.MP_NORMAL)
+    errors = mel.recompile_material(mat)
+    if errors:
+        raise RuntimeError(f"skin bake material failed to compile: {errors}")
+    unreal.EditorAssetLibrary.save_asset(SKIN_BAKE_MATERIAL, only_if_is_dirty=False)
+    log("skin bake material made")
+    return mat
+
+
+def skin_bake_instance(skin: str, params: dict):
+    """MI_H4kBake_<skin>_<hash>: the skin's base colour map on the bake graph with the scalar values baked in (cached)."""
+    import hashlib
+    key = json.dumps({k: round(float(v), 3) for k, v in sorted(params.items())})
+    name = f"MI_H4kBake_{skin}_{hashlib.md5(key.encode()).hexdigest()[:8]}"
+    path = f"{HUMPBACK4K_DIR}/{name}"
+    if unreal.EditorAssetLibrary.does_asset_exist(path):
+        return unreal.EditorAssetLibrary.load_asset(path)
+    parent = ensure_skin_bake_material()
+    mel = unreal.MaterialEditingLibrary
+    inst = unreal.AssetToolsHelpers.get_asset_tools().create_asset(name, HUMPBACK4K_DIR, unreal.MaterialInstanceConstant,
+                                                                     unreal.MaterialInstanceConstantFactoryNew())
+    mel.set_material_instance_parent(inst, parent)
+    tex_path = f"{HUMPBACK4K_DIR}/T_Humpback4k_BaseColor_{skin}" if skin != "00" else f"{HUMPBACK4K_DIR}/T_Humpback4k_BaseColor"
+    mel.set_material_instance_texture_parameter_value(inst, "BaseColor", unreal.EditorAssetLibrary.load_asset(tex_path))
+    for k, v in params.items():
+        mel.set_material_instance_scalar_parameter_value(inst, k, float(v))
+    mel.update_material_instance(inst)
+    unreal.EditorAssetLibrary.save_asset(path, only_if_is_dirty=False)
+    log(f"{name}: {key}")
+    return inst
+
+
+def spawn_whale_variant(shot: dict, label: str, hidden: bool = False, stencil: int = WHALE_STENCIL, skin_bake: dict | None = None) -> unreal.Actor:
     """A whale actor for one shot: its deformed mesh (whale.mesh_obj) or the base mesh, with
     the shot's skin material instance, custom stencil 1, at the shot's transform."""
     base = find_actor(WHALE_LABEL)
@@ -846,6 +1114,14 @@ def spawn_whale_variant(shot: dict, label: str, hidden: bool = False, stencil: i
     if kind == "humpback4k":
         materials = ensure_humpback4k_materials()
         skin_material = unreal.EditorAssetLibrary.load_asset(skin_instance_path(skin, kind)) if skin != "00" else None
+        if skin_bake:
+            # run06 round 8: the batch's skin values and this animal's wetness, baked into an instance asset
+            params = {k: float(v) for k, v in skin_bake.items() if k != "wet_roughness" and not k.startswith("_")}
+            rs = shot.get("skin_roughness_scale")
+            if rs is not None:
+                lo, hi = skin_bake.get("wet_roughness", [0.25, 0.6])
+                params["RoughnessBase"] = round(min(max(float(rs), lo), hi) / 0.05) * 0.05
+            skin_material = skin_bake_instance(skin, params)
         slots = [str(m.get_editor_property("material_slot_name")).lower() for m in mesh.get_editor_property("static_materials")]
         for slot, name in enumerate(slots):
             # OBJ groups body / eye (factory.humpback4k.write_obj); anything unnamed is body

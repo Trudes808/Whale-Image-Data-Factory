@@ -24,12 +24,14 @@ echo "Rendering $sequence -> $out_dir (log: $log) ..."
 wf_guarded timeout --signal=TERM "${WF_RENDER_TIMEOUT_S:-3600}" \
     "$WF_REPO_ROOT/tools/ue_exec.sh" "$WF_UE_EDITOR" "$WF_UPROJECT" "$map" -game \
     -LevelSequence="$sequence" -MoviePipelineConfig="$config" \
-    -windowed -resx=1280 -resy=720 -RenderOffscreen -unattended -nosplash -nosound \
-    -ExecCmds="r.Water.OverrideWavesTime ${WF_WAVE_TIME_S:-0}" \
+    -windowed -resx="${WF_RES_X:-1280}" -resy="${WF_RES_Y:-720}" -RenderOffscreen -unattended -nosplash -nosound \
+    -ExecCmds="r.Water.OverrideWavesTime ${WF_WAVE_TIME_S:-0}" ${WF_RENDER_EXTRA_ARGS:-} \
     -abslog="$log" >/dev/null 2>&1 || true
 # r.Water.OverrideWavesTime freezes the ocean's wave time for the whole render (factory.shotlist.WAVE_TIME_S;
 # shots vary the wave phase by translating the scene). It is an ECVF_Cheat cvar: Engine.ini cannot set it and
 # the sequencer cvar track never reached the water, a console command at startup does.
+# WF_RENDER_EXTRA_ARGS (default empty): extra engine arguments for a render, e.g. the SM6 / hardware ray tracing test
+# (README run06 realism, "engine upgrade test"); unset, the render is exactly as before.
 
 grep -E "LogMovieRenderPipeline: (Error|Warning)|Movie Pipeline completed|Fatal" "$log" | sed -E 's/^\[[^]]*\]\[[^]]*\]//' || true
 shopt -s nullglob

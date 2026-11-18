@@ -86,6 +86,8 @@ POSES: dict[str, Pose] = {
                        Camera(180.0, 60.0, 3.0, 85.0), splash="crown", splash_scale=0.35, splash_amount=0.5),
     "peduncle": Pose(-35.0, 0.0, 2.0, "tail stock arched high before the flukes come up",
                      Camera(140.0, 60.0, 3.0, 85.0), splash="wash", splash_scale=0.5, splash_amount=0.5),
+    "tail_stock": Pose(-35.0, 0.0, 0.4, "tail stock arching out with the dorsal fin already under water (a finless back)",
+                     Camera(140.0, 60.0, 3.0, 85.0), splash="wash", splash_scale=0.5, splash_amount=0.5),
     "spyhop_low": Pose(72.0, 0.0, 1.3, "only the rostrum out of the water",
                        Camera(30.0, 50.0, 3.0, 85.0), splash="wash", splash_scale=0.4, splash_amount=0.4),
     "roll_belly": Pose(0.0, 160.0, 1.2, "rolled belly-up at the surface, fins in the air",
@@ -102,6 +104,19 @@ POSES: dict[str, Pose] = {
                     Camera(100.0, 60.0, 3.0, 50.0), splash="wash", splash_scale=0.4, splash_amount=0.4),
     "back_arch": Pose(-5.0, 0.0, 1.1, "breath then arch: blowhole to dorsal fin and back out of the water, sliding through",
                       Camera(100.0, 60.0, 3.0, 50.0), splash="wash", splash_scale=0.5, splash_amount=0.5),
+    # run06 realism (factory.realism): pitch / roll / clearance are set per shot by the phase or the category recipe
+    "fluke_rollout": Pose(-20.0, 0.0, 0.4, "dive start: tail stock arched, fluke rolling out level at the surface",
+                          Camera(180.0, 60.0, 3.0, 70.0), splash="wash", splash_scale=0.45, splash_amount=0.7),
+    "fluke_sinking": Pose(-75.0, 0.0, 0.2, "end of the dive: only the fluke tips / outer blades above the water",
+                          Camera(180.0, 60.0, 3.0, 70.0), splash="wash", splash_scale=0.35, splash_amount=0.5),
+    "pec_slap": Pose(0.0, 90.0, 1.6, "on its side, one long flipper raised or slapping the water",
+                     Camera(90.0, 55.0, 3.0, 70.0), splash="crown", splash_scale=0.5, splash_amount=0.8),
+    "head_rise": Pose(30.0, 0.0, 1.5, "head rise / lunge: rostrum and head out of the water",
+                      Camera(30.0, 50.0, 3.0, 70.0), splash="wash", splash_scale=0.6, splash_amount=0.8),
+    "tail_slap": Pose(0.0, 180.0, 1.8, "belly up, the tail flexed out of the water before slapping it down",
+                      Camera(150.0, 60.0, 3.0, 70.0), splash="crown", splash_scale=0.6, splash_amount=1.0),
+    "peduncle_throw": Pose(0.0, 90.0, 1.8, "on its side, the tail stock and flukes thrown sideways out of the water",
+                           Camera(120.0, 60.0, 3.0, 70.0), splash="crown", splash_scale=0.7, splash_amount=1.0),
 }
 # categories whose clearance is measured on the back only (body-frame BACK_X_MIN_CM < x < BACK_X_MAX_CM: no flukes /
 # tail stock, and no head: a nose-up body would otherwise be placed by its rostrum and show the head, not the back)

@@ -1,0 +1,172 @@
+{
+ "aristea_wreck_puresky": {
+  "png": "aristea_wreck_puresky_sunless.png",
+  "png_scale": 8.0,
+  "sun_elevation_deg": 47.29,
+  "sun_azimuth_deg": 44.06,
+  "sun_normal_irradiance_rgb": [
+   32.9152,
+   31.92775,
+   30.28199
+  ],
+  "sky_horizontal_irradiance_rgb": [
+   3.82394,
+   3.92723,
+   4.34181
+  ],
+  "sun_restored": true
+ },
+ "kloofendal_43d_clear_puresky": {
+  "png": "kloofendal_43d_clear_puresky_sunless.png",
+  "png_scale": 8.0,
+  "sun_elevation_deg": 42.9,
+  "sun_azimuth_deg": 36.15,
+  "sun_normal_irradiance_rgb": [
+   6.52339,
+   6.14283,
+   5.62653
+  ],
+  "sky_horizontal_irradiance_rgb": [
+   0.93714,
+   1.26882,
+   1.85161
+  ],
+  "sun_restored": false
+ },
+ "kloofendal_48d_partly_cloudy_puresky": {
+  "png": "kloofendal_48d_partly_cloudy_puresky_sunless.png",
+  "png_scale": 8.0,
+  "sun_elevation_deg": 47.88,
+  "sun_azimuth_deg": 34.26,
+  "sun_normal_irradiance_rgb": [
+   12.96509,
+   12.57613,
+   11.92788
+  ],
+  "sky_horizontal_irradiance_rgb": [
+   1.24459,
+   1.44601,
+   2.11778
+  ],
+  "sun_restored": true
+ },
+ "kloppenheim_03_puresky": {
+  "png": "kloppenheim_03_puresky_sunless.png",
+  "png_scale": 8.0,
+  "sun_elevation_deg": 58.62,
+  "sun_azimuth_deg": 36.06,
+  "sun_normal_irradiance_rgb": [
+   13.45342,
+   13.04982,
+   12.37715
+  ],
+  "sky_horizontal_irradiance_rgb": [
+   1.82838,
+   1.87328,
+   2.04115
+  ],
+  "sun_restored": true
+ },
+ "kloppenheim_05_puresky": {
+  "png": "kloppenheim_05_puresky_sunless.png",
+  "png_scale": 8.0,
+  "sun_elevation_deg": 74.53,
+  "sun_azimuth_deg": 35.92,
+  "sun_normal_irradiance_rgb": [
+   7.1128,
+   6.64295,
+   6.10908
+  ],
+  "sky_horizontal_irradiance_rgb": [
+   1.07122,
+   1.37664,
+   2.13244
+  ],
+  "sun_restored": false
+ },
+ "qwantani_late_afternoon_puresky": {
+  "png": "qwantani_late_afternoon_puresky_sunless.png",
+  "png_scale": 8.0,
+  "sun_elevation_deg": 19.08,
+  "sun_azimuth_deg": 36.13,
+  "sun_normal_irradiance_rgb": [
+   25.37033,
+   24.60922,
+   23.34071
+  ],
+  "sky_horizontal_irradiance_rgb": [
+   1.0166,
+   1.33228,
+   1.79775
+  ],
+  "sun_restored": true
+ },
+ "qwantani_mid_morning_puresky": {
+  "png": "qwantani_mid_morning_puresky_sunless.png",
+  "png_scale": 8.0,
+  "sun_elevation_deg": 40.15,
+  "sun_azimuth_deg": 36.05,
+  "sun_normal_irradiance_rgb": [
+   8.47838,
+   7.90339,
+   7.14448
+  ],
+  "sky_horizontal_irradiance_rgb": [
+   0.56371,
+   0.79504,
+   1.19691
+  ],
+  "sun_restored": false
+ },
+ "qwantani_noon_puresky": {
+  "png": "qwantani_noon_puresky_sunless.png",
+  "png_scale": 8.0,
+  "sun_elevation_deg": 49.83,
+  "sun_azimuth_deg": 36.18,
+  "sun_normal_irradiance_rgb": [
+   7.58546,
+   7.34723,
+   7.08923
+  ],
+  "sky_horizontal_irradiance_rgb": [
+   0.32406,
+   0.48761,
+   0.80585
+  ],
+  "sun_restored": false
+ },
+ "sunflowers_puresky": {
+  "png": "sunflowers_puresky_sunless.png",
+  "png_scale": 8.0,
+  "sun_elevation_deg": 43.03,
+  "sun_azimuth_deg": 36.17,
+  "sun_normal_irradiance_rgb": [
+   12.3404,
+   11.97019,
+   11.35317
+  ],
+  "sky_horizontal_irradiance_rgb": [
+   1.32288,
+   1.4428,
+   1.44475
+  ],
+  "sun_restored": true
+ },
+ "syferfontein_18d_clear_puresky": {
+  "png": "syferfontein_18d_clear_puresky_sunless.png",
+  "png_scale": 8.0,
+  "sun_elevation_deg": 18.36,
+  "sun_azimuth_deg": 35.87,
+  "sun_normal_irradiance_rgb": [
+   15.42443,
+   13.35818,
+   8.274
+  ],
+  "sky_horizontal_irradiance_rgb": [
+   0.36227,
+   0.56743,
+   0.99922
+  ],
+  "sun_restored": false
+ }
+}

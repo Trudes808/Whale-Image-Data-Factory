@@ -245,3 +245,6 @@ data/
 
 # Machine-local overrides
 tools/ue_env.local.sh
+
+# run06: the purchased Niagara splash pack, copied in for the integration probe (licensed: never commit)
+unreal/WhaleFactory/Content/SplashPack/
