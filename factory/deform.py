@@ -257,15 +257,18 @@ def write_batch_meshes(batch_path, base_obj, out_dir) -> dict:
             model.enable_blade(bt if bt.is_absolute() else _R / bt)
         for shot in batch["shots"]:
             path = out_dir / f"{shot['id']}.obj"
-            model.write_obj(model.posed(shot), path, f"{batch['whale_kind']} posed for shot {shot['id']} (clip t {(shot.get('pose') or {}).get('clip_t')})")
+            model.write_obj(model.posed(shot), path, f"{batch['whale_kind']} posed for shot {shot['id']} (clip t {(shot.get('pose') or {}).get('clip_t')})",
+                            individual=shot.get("individual"))
             shot["whale"]["mesh_obj"] = str(path.resolve())
             if shot.get("companion"):
                 cpath = out_dir / f"{shot['id']}c.obj"
-                model.write_obj(model.posed(shot["companion"]), cpath, f"{batch['whale_kind']} companion of shot {shot['id']}")
+                model.write_obj(model.posed(shot["companion"]), cpath, f"{batch['whale_kind']} companion of shot {shot['id']}",
+                                individual=shot["companion"].get("individual"))
                 shot["companion"]["whale"]["mesh_obj"] = str(cpath.resolve())
             for c in shot.get("companions") or []:          # run06 scenes: every further whale
                 cpath = out_dir / f"{shot['id']}a{c['instance_id']}.obj"
-                model.write_obj(model.posed(c), cpath, f"{batch['whale_kind']} {c.get('role')} {c['instance_id']} of shot {shot['id']}")
+                model.write_obj(model.posed(c), cpath, f"{batch['whale_kind']} {c.get('role')} {c['instance_id']} of shot {shot['id']}",
+                                individual=c.get("individual"))
                 c["whale"]["mesh_obj"] = str(cpath.resolve())
         (out_dir / "batch.json").write_text(json.dumps(batch))
         return {"shots": len(batch["shots"]), "meshes": len(batch["shots"]) + sum(len(s.get("companions") or []) + bool(s.get("companion")) for s in batch["shots"])}

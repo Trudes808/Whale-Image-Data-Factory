@@ -876,11 +876,17 @@ class WhaleModel:
             ids[sel] = PART_IDS[name]
         return ids
 
-    def write_obj(self, vertices: np.ndarray, path: Path, comment: str = "posed whale") -> None:
-        """Posed OBJ with the model's groups (body, eye...) for the renderer."""
+    def write_obj(self, vertices: np.ndarray, path: Path, comment: str = "posed whale", individual=None) -> None:
+        """Posed OBJ with the model's groups (body, eye...) for the renderer. With the parametric blade, the blade's UVs
+        are the animal's own two side charts (factory.blade_uv2, round 9), with OBJ-level copies of its seam vertices."""
         from factory.humpback4k import write_obj as _w
         groups = []
         uv = self._uv()
+        blade_info = None
+        if getattr(self, "n_rig", None) is not None:
+            from factory import blade_uv2
+            uv_b, blade_info = blade_uv2.blade_uv(self._blade_local(individual)["vertices"])
+            uv = np.concatenate([uv[: self.n_rig], uv_b])
         items = dict(self.groups)
         if getattr(self, "n_rig", None) is not None and "blade" in items and "body" in items and len(items["body"]):
             # round 8: the blade is written in the body's group (one material slot), so it gets the same skin material and
@@ -897,7 +903,15 @@ class WhaleModel:
             fmask = (self.faces[:, 0] >= lo) & (self.faces[:, 0] < hi)
             g = (name, vertices[lo:hi], self.faces[fmask] - lo, uv[lo:hi])
             if getattr(self, "n_rig", None) is not None and name == "body" and hi > self.n_rig:
-                g = g + (self._smooth_normals(vertices[lo:hi], self.faces[fmask] - lo, self.n_rig - lo),)
+                N = self._smooth_normals(vertices[lo:hi], self.faces[fmask] - lo, self.n_rig - lo)
+                if blade_info is not None:
+                    from factory import blade_uv2
+                    n0 = self.n_rig - lo
+                    V2, F2, UV2 = blade_uv2.seam_split(g[1], g[2], g[3], blade_info, n0)
+                    sc = blade_info["seam"]
+                    N = np.concatenate([N, N[sc["cols"] + n0], N[[sc["tip"] + n0]]])
+                    g = (name, V2, F2, UV2)
+                g = g + (N,)
             groups.append(g)
         _w(Path(path), groups, comment)
 
