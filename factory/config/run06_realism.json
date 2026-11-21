@@ -426,6 +426,15 @@
   "winding_fix": true,
   "arch_bend": {
    "neutral": 0.5
+  },
+  "obj_shared_vertices": {
+   "scope": "model"
+  },
+  "blade_uv_match": {
+   "skin_suffix": "d",
+   "band_cm": 4.0,
+   "step": 0.01,
+   "reach": 0.1
   }
  },
  "companion": {

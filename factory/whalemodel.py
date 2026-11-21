@@ -170,6 +170,8 @@ class WhaleModel:
             model.blade_uv_match = dict(config["whale"]["blade_uv_match"])
         if (config.get("whale") or {}).get("dorsal_hump"):              # run06 round 20e: a convex hump under the welded fin
             model.dorsal_hump = dict(config["whale"]["dorsal_hump"])
+        if (config.get("whale") or {}).get("fore_arch"):                # run06 round 20i: convex bend ahead of the fin (surfacing)
+            model.fore_arch = dict(config["whale"]["fore_arch"])
         if (config.get("whale") or {}).get("blade_templates"):          # run06 round 7: the parametric dorsal blade
             bt = config["whale"]["blade_templates"]
             model.enable_blade(Path(bt) if Path(bt).is_absolute() else REPO_ROOT / bt)
@@ -1291,12 +1293,66 @@ class WhaleModel:
                 return base
             ab = getattr(self, "arch_bend", None)
             if ab:                                       # run06 round 20c (whale.arch_bend): bent about the body's own centre line
-                return deform.deform_centreline(base, params, self._arch_exclude(len(base)), neutral=float(ab.get("neutral", 0.0)))
+                fx = self._fore_arch_extra(shot, base, scale) if getattr(self, "fore_arch", None) else None   # round 20i
+                return deform.deform_centreline(base, params, self._arch_exclude(len(base)), neutral=float(ab.get("neutral", 0.0)), extra=fx)
             return deform.deform(base, params, None)
         # The clip bends the body and the pectoral angle is a joint matter (pec_droop_deg, individuals): the
         # procedural fin rotation (deform.rotate_fins) picks its "fin" vertices by a K9239 heuristic that tears
         # this mesh at the shoulder, so none of the procedural parameters apply to clip frames.
         return base
+
+    # ---- run06 round 20i (whale.fore_arch: the back keeps rounding ahead of the fin) ----------------------------------
+    R20I_CATEGORIES = ("surface", "back_arch", "logging", "blow", "blow_sliver", "awash")
+
+    def fore_arch_params(self, shot: dict) -> dict | None:
+        """Per-animal draws of whale.fore_arch (deterministic: sha1 of the individual, clip time and arch draws):
+        deg (convex turn added ahead of the fin), start / length (cm of arc ahead of the fin's front, x body scale),
+        comp (share of deg given back further ahead, toward the head), comp_start / comp_len (cm). None when the key is
+        off or the animal's category is not a surfacing one (key "categories", default R20I_CATEGORIES)."""
+        fa = getattr(self, "fore_arch", None)
+        if not fa or shot.get("category") not in tuple(fa.get("categories") or self.R20I_CATEGORIES):
+            return None
+        import hashlib
+        tag = json.dumps([shot.get("individual"), (shot.get("pose") or {}).get("clip_t"), shot.get("deform")], sort_keys=True, default=str)
+        h = hashlib.sha1(("fore_arch:" + tag).encode()).digest()
+        r = [int.from_bytes(h[2 * i: 2 * i + 2], "big") / 65535.0 for i in range(6)]
+        draw = lambda k, i: (float(fa[k][0]) + r[i] * (float(fa[k][1]) - float(fa[k][0]))) if isinstance(fa.get(k), (list, tuple)) else float(fa.get(k, 0.0))
+        return {"deg": draw("deg", 0), "start": draw("start", 1), "len": draw("len", 2), "comp": draw("comp", 3),
+                "comp_start": draw("comp_start", 4), "comp_len": draw("comp_len", 5)}
+
+    def _fore_arch_offset(self, ind, idx) -> float:
+        """x of the welded fin's front base (landmark dorsal_fin_front) minus the front end of the rig's own dorsal-fin
+        vertices, in the individual's rest pose (cm at body scale 1; cached); 0 without the weld."""
+        cache = self.__dict__.setdefault("_fore_arch_off", {})
+        key = json.dumps(ind, sort_keys=True, default=str)
+        if key not in cache:
+            off = 0.0
+            if getattr(self, "weld", None) is not None:
+                fa = self.fore_arch; self.fore_arch = None
+                try:
+                    V = np.asarray(self.posed({"individual": ind, "body_scale": 1.0}), float)
+                    off = float(V[self.landmark_indices()["dorsal_fin_front"], 0] - V[idx, 0].max())
+                finally:
+                    self.fore_arch = fa
+            cache[key] = off
+        return cache[key]
+
+    def _fore_arch_extra(self, shot: dict, base: np.ndarray, scale: float) -> dict | None:
+        """deform_centreline's extra pitch terms for whale.fore_arch; anchor = the front end (max x) of the rig's own
+        dorsal-fin vertices in this pose (the welded blade's front base lies within ~0.2 m of it)."""
+        p = self.fore_arch_params(shot)
+        if not p or not p["deg"]:
+            return None
+        pg = self.part_groups(); idx = np.asarray(pg.get("dorsal", []), int); idx = idx[idx < len(base)]
+        if not len(idx):
+            return None
+        ax = float(base[idx, 0].max()) + self._fore_arch_offset(shot.get("individual"), idx) * scale
+        s0 = p["start"] * scale; s1 = s0 + max(p["len"], 1.0) * scale
+        terms = [[p["deg"], s0, s1]]
+        if p["comp"]:
+            c0 = p["comp_start"] * scale; terms.append([-p["comp"] * p["deg"], c0, c0 + max(p["comp_len"], 1.0) * scale])
+        self._fore_arch_info = {"anchor_x": ax, "terms": terms}
+        return {"anchor_x": ax, "terms": terms}
 
     # ---- run06 round 20d (creases at the fin foot, the keel behind the fin) -------------------------------------------
     R20D_WELD_REST = ("K_BACK", "LOW_RATE", "LOW_T", "SIG_MIN")

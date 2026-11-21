@@ -211,8 +211,20 @@ def _line_at(line: dict, sv: np.ndarray):
     return p, th, ps
 
 
+def _extra_pitch(line: dict, sv: np.ndarray, extra: dict) -> np.ndarray:
+    """run06 round 20i (whale.fore_arch): added pitch (radians) along the centre line at arc lengths sv. extra =
+    {"anchor_x": cm (the fin's front base, posed x), "terms": [[deg, s0_cm, s1_cm], ...]}: each term turns the line by
+    deg (> 0 convex: the line ahead turns down) spread as a smoothstep between s0 and s1 cm of arc ahead of the anchor;
+    0 behind s0, so the body behind the first term keeps its orientation."""
+    sa = float(np.interp(float(extra["anchor_x"]), line["c"][:, 0], line["s"]))
+    out = np.zeros_like(np.asarray(sv, float))
+    for deg, s0, s1 in extra.get("terms") or []:
+        out -= np.radians(float(deg)) * _smooth((np.asarray(sv, float) - sa - float(s0)) / max(float(s1) - float(s0), 1e-6))
+    return out
+
+
 def deform_centreline(vertices_cm: np.ndarray, params: DeformParams, exclude: np.ndarray | None = None,
-                      neutral: float = 0.0) -> np.ndarray:
+                      neutral: float = 0.0, extra: dict | None = None) -> np.ndarray:
     """deform() done about the body's own centre line (run06 round 20c, config whale.arch_bend). deform() bends rigid
     sections about the mesh's z = 0 axis and turns them the wrong way (a section's 'up' tilts by +pitch while the spine
     tilts by +pitch, so sections sit 2 x pitch off perpendicular): over a hump the top converges (the head of a clip
@@ -222,7 +234,7 @@ def deform_centreline(vertices_cm: np.ndarray, params: DeformParams, exclude: np
     frame: sections stay perpendicular, the neutral line keeps its length. The pectoral rotation of deform() (K9239 fin
     regions) is not applied (the rig path never used it)."""
     v = np.asarray(vertices_cm, float)
-    if params.is_identity():
+    if params.is_identity() and not extra:
         return v.copy()
     line = centre_line(v, exclude, neutral=neutral)
     S = line["S"]
@@ -243,6 +255,8 @@ def deform_centreline(vertices_cm: np.ndarray, params: DeformParams, exclude: np
     grid = np.linspace(min(0.0, float(sv.min())), max(S, float(sv.max())), 1025)
     gp, gth, gps = _line_at(line, grid)
     dp, dy = _bend_profile(np.clip(grid / S, 0.0, 1.0), params)
+    if extra:                                    # round 20i: whale.fore_arch (None = as before)
+        dp = dp + _extra_pitch(line, grid, extra)
     seg = np.diff(gp, axis=0)
     mth, mps = 0.5 * (gth[1:] + gth[:-1]), 0.5 * (gps[1:] + gps[:-1])
     mdp, mdy = 0.5 * (dp[1:] + dp[:-1]), 0.5 * (dy[1:] + dy[:-1])
@@ -256,6 +270,8 @@ def deform_centreline(vertices_cm: np.ndarray, params: DeformParams, exclude: np
     cnew = np.stack([np.interp(sv, grid, newp[:, k]) for k in range(3)], 1)
     fr = np.clip(sv / S, 0.0, 1.0)
     vdp, vdy = _bend_profile(fr, params)
+    if extra:
+        vdp = vdp + _extra_pitch(line, sv, extra)
     roll = np.radians(params.fluke_twist_deg) * _smooth((TAIL_END - fr) / (TAIL_END - TAIL_START)) if params.fluke_twist_deg else None
     t1, b1, n1 = _frame(th0 + vdp, ps0 + vdy, roll)
     return cnew + ut[:, None] * t1 + ub[:, None] * b1 + un[:, None] * n1
@@ -382,6 +398,8 @@ def write_batch_meshes(batch_path, base_obj, out_dir) -> dict:
                 model.obj_shared_vertices = dict(_wh["obj_shared_vertices"])
             if _wh.get("blade_uv_match"):                # round 20g: blade UV charts placed to match the patch's base colour
                 model.blade_uv_match = dict(_wh["blade_uv_match"])
+            if _wh.get("fore_arch"):                     # round 20i: convex bend ahead of the fin (surfacing poses)
+                model.fore_arch = dict(_wh["fore_arch"])
         if batch.get("blade_templates"):                 # run06 round 7: the parametric dorsal blade (as in shotlist / postprocess)
             bt = Path(batch["blade_templates"])
             from factory.whalemodel import REPO_ROOT as _R
