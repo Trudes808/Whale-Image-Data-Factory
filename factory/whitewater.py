@@ -94,6 +94,8 @@ def spec(shot: dict, world_cm: np.ndarray, waves: list[dict], t: float, rng: np.
         out["churn_scale"] = float(cfg["churn_scale"])          # run06 realism: a fainter aerated cloud (no cyan glow)
     if cfg.get("foam_opacity") is not None:
         out["foam_opacity"] = float(cfg["foam_opacity"])        # run06 realism round 2: thin lace, not white flakes (wf_shot)
+    if cfg.get("foam_lit"):
+        out["foam_lit"] = dict(cfg["foam_lit"])                 # run06 round 19: foam lit per pixel by the sun (wf_shot)
     if cfg.get("contact_boost") is not None:
         for k in ("contact", "wake"):
             out[k] = round(out[k] * float(cfg["contact_boost"]), 3)   # run06 realism: back wash and wake are the common white water

@@ -149,6 +149,118 @@ def deform(vertices_cm: np.ndarray, params: DeformParams, fin_regions: dict | No
     return out
 
 
+def _frame(theta: np.ndarray, psi: np.ndarray, roll: np.ndarray | None = None):
+    """Unit tangent, lateral (binormal) and up (normal) vectors of a line with pitch theta and yaw psi (radians); the
+    tangent is (cos th cos ps, cos th sin ps, sin th) as in deform()'s spine integration. roll turns (b, n) about t."""
+    ct, st, cp, sp = np.cos(theta), np.sin(theta), np.cos(psi), np.sin(psi)
+    t = np.stack([ct * cp, ct * sp, st], -1)
+    b = np.stack([-sp, cp, np.zeros_like(sp)], -1)
+    n = np.stack([-st * cp, -st * sp, ct], -1)
+    if roll is not None:
+        cr, sr = np.cos(roll)[..., None], np.sin(roll)[..., None]
+        b, n = b * cr + n * sr, -b * sr + n * cr
+    return t, b, n
+
+
+def centre_line(v: np.ndarray, exclude: np.ndarray | None = None, bins: int = 96, neutral: float = 0.0) -> dict:
+    """The body's own centre line in whatever pose the mesh is in (run06 round 20c): per slice along x the mid point of
+    the cross-section's extent (y and z), fins (exclude mask: pectorals, old dorsal fin) left out, smoothed along the
+    body. neutral (0..1) lifts the line toward the top of the section (0 = centre, 1 = dorsal outline): the bend's
+    neutral line, the one that keeps its length. Returns {"s", "c", "theta", "psi", "S"} (arc length cm, points, pitch,
+    yaw)."""
+    x = v[:, 0]
+    x_min, x_max = float(x.min()), float(x.max())
+    keep = np.ones(len(v), bool) if exclude is None else ~np.asarray(exclude, bool)
+    edges = np.linspace(x_min, x_max, bins + 1); xc = 0.5 * (edges[1:] + edges[:-1])
+    k = np.clip(np.searchsorted(edges, x[keep], side="right") - 1, 0, bins - 1)
+    vy, vz = v[keep, 1], v[keep, 2]
+    ymin = np.full(bins, np.inf); ymax = np.full(bins, -np.inf); zmin = np.full(bins, np.inf); zmax = np.full(bins, -np.inf)
+    np.minimum.at(ymin, k, vy); np.maximum.at(ymax, k, vy); np.minimum.at(zmin, k, vz); np.maximum.at(zmax, k, vz)
+    ok = np.isfinite(zmin)
+    ym, zm = 0.5 * (ymin + ymax), 0.5 * (zmin + zmax)
+    zm = zm + neutral * (zmax - zm)
+    # the line stays in the vertical plane y = 0 (no yaw): the keyframe's own sideways flex is kept in the section
+    # offsets as in deform(), and the 5.8 m fluke span never projects onto a laterally curved line
+    ym = np.zeros(bins); zm = np.interp(xc, xc[ok], zm[ok])
+    # smooth (Gaussian, 3 % of the length), edges padded with the end values
+    sig = max(1.0, 0.03 * bins); r = int(3 * sig); w = np.exp(-0.5 * (np.arange(-r, r + 1) / sig) ** 2); w /= w.sum()
+    ys = np.convolve(np.pad(ym, r, mode="edge"), w, "valid"); zs = np.convolve(np.pad(zm, r, mode="edge"), w, "valid")
+    c = np.stack([xc, ys, zs], 1)
+    # extend to the mesh ends along the end tangents so every vertex projects inside
+    d = np.diff(c, axis=0)
+    t0 = d[0] / np.linalg.norm(d[0]); t1 = d[-1] / np.linalg.norm(d[-1])
+    c = np.vstack([c[0] - t0 * (xc[0] - x_min + 0.02 * (x_max - x_min)) / max(t0[0], 0.2), c,
+                   c[-1] + t1 * (x_max - xc[-1] + 0.02 * (x_max - x_min)) / max(t1[0], 0.2)])
+    seg = np.diff(c, axis=0); sl = np.linalg.norm(seg, axis=1)
+    s = np.concatenate([[0.0], np.cumsum(sl)])
+    tan = np.gradient(c, s, axis=0); tan /= np.linalg.norm(tan, axis=1, keepdims=True)
+    theta = np.arcsin(np.clip(tan[:, 2], -1, 1)); psi = np.unwrap(np.arctan2(tan[:, 1], tan[:, 0]))
+    return {"s": s, "c": c, "theta": theta, "psi": psi, "S": float(s[-1])}
+
+
+def _line_at(line: dict, sv: np.ndarray):
+    """Point, pitch and yaw of the centre line at arc lengths sv (linear extrapolation past the ends)."""
+    s, c = line["s"], line["c"]
+    p = np.stack([np.interp(sv, s, c[:, k]) for k in range(3)], 1)
+    th = np.interp(sv, s, line["theta"]); ps = np.interp(sv, s, line["psi"])
+    lo, hi = sv < s[0], sv > s[-1]
+    if lo.any() or hi.any():
+        t, _, _ = _frame(th, ps)
+        p[lo] = c[0] + (sv[lo] - s[0])[:, None] * t[lo]
+        p[hi] = c[-1] + (sv[hi] - s[-1])[:, None] * t[hi]
+    return p, th, ps
+
+
+def deform_centreline(vertices_cm: np.ndarray, params: DeformParams, exclude: np.ndarray | None = None,
+                      neutral: float = 0.0) -> np.ndarray:
+    """deform() done about the body's own centre line (run06 round 20c, config whale.arch_bend). deform() bends rigid
+    sections about the mesh's z = 0 axis and turns them the wrong way (a section's 'up' tilts by +pitch while the spine
+    tilts by +pitch, so sections sit 2 x pitch off perpendicular): over a hump the top converges (the head of a clip
+    keyframe, 1-3 m above the axis, is crushed to ~0.4 of its area). Here every vertex is expressed in the frame of its
+    own section of the centre line (perpendicular to the line, found by projection), the line is bent by the same pitch /
+    yaw profile (_bend_profile, the same arch_deg / arch_centre / ... meaning) and the vertex is put back in the bent
+    frame: sections stay perpendicular, the neutral line keeps its length. The pectoral rotation of deform() (K9239 fin
+    regions) is not applied (the rig path never used it)."""
+    v = np.asarray(vertices_cm, float)
+    if params.is_identity():
+        return v.copy()
+    line = centre_line(v, exclude, neutral=neutral)
+    S = line["S"]
+    # project every vertex onto the line (Newton steps on (v - c(s)) . t(s) = 0), starting from its x
+    sv = np.interp(v[:, 0], line["c"][:, 0], line["s"])
+    for _ in range(6):
+        p, th, ps = _line_at(line, sv)
+        t, _, _ = _frame(th, ps)
+        step = np.einsum("ij,ij->i", v - p, t)
+        sv = sv + step
+        if np.abs(step).max() < 1e-3:
+            break
+    p, th0, ps0 = _line_at(line, sv)
+    t0, b0, n0 = _frame(th0, ps0)
+    d = v - p
+    ut, ub, un = (np.einsum("ij,ij->i", d, e) for e in (t0, b0, n0))
+    # the bent line: the original segments, each turned by the profile's added pitch / yaw, chained from mid-body
+    grid = np.linspace(min(0.0, float(sv.min())), max(S, float(sv.max())), 1025)
+    gp, gth, gps = _line_at(line, grid)
+    dp, dy = _bend_profile(np.clip(grid / S, 0.0, 1.0), params)
+    seg = np.diff(gp, axis=0)
+    mth, mps = 0.5 * (gth[1:] + gth[:-1]), 0.5 * (gps[1:] + gps[:-1])
+    mdp, mdy = 0.5 * (dp[1:] + dp[:-1]), 0.5 * (dy[1:] + dy[:-1])
+    a0, a1, a2 = _frame(mth, mps); e0, e1, e2 = _frame(mth + mdp, mps + mdy)
+    seg_new = (np.einsum("ij,ij->i", seg, a0)[:, None] * e0 + np.einsum("ij,ij->i", seg, a1)[:, None] * e1
+               + np.einsum("ij,ij->i", seg, a2)[:, None] * e2)
+    mid = int(np.argmin(np.abs(grid - 0.5 * S)))
+    newp = np.zeros_like(gp); newp[mid] = gp[mid]
+    newp[mid + 1:] = gp[mid] + np.cumsum(seg_new[mid:], axis=0)
+    newp[:mid] = gp[mid] - np.cumsum(seg_new[:mid][::-1], axis=0)[::-1]
+    cnew = np.stack([np.interp(sv, grid, newp[:, k]) for k in range(3)], 1)
+    fr = np.clip(sv / S, 0.0, 1.0)
+    vdp, vdy = _bend_profile(fr, params)
+    roll = np.radians(params.fluke_twist_deg) * _smooth((TAIL_END - fr) / (TAIL_END - TAIL_START)) if params.fluke_twist_deg else None
+    t1, b1, n1 = _frame(th0 + vdp, ps0 + vdy, roll)
+    return cnew + ut[:, None] * t1 + ub[:, None] * b1 + un[:, None] * n1
+
+
 def fin_regions(vertices_cm: np.ndarray) -> dict:
     """Vertex indices of the left and right pectoral fins and their root hinge points.
 
@@ -251,6 +363,25 @@ def write_batch_meshes(batch_path, base_obj, out_dir) -> dict:
             model.dorsal_front_ratio = float(batch["dorsal_front_ratio"])
         if batch.get("ridge_soften"):                    # run06 round 8: ridge knobs toned down (as in shotlist / postprocess)
             model.ridge_soften = float(batch["ridge_soften"])
+        if batch.get("blade_weld"):                      # run06 round 12: the blade welded into the back
+            model.blade_weld = True
+            from factory import weld as _wd              # round 15: blade_weld = 15 (true = round 13)
+            if _wd.design_of(batch["blade_weld"]) == 15:
+                model.weld_design = 15
+        rc_path = Path(batch_path).resolve().parent.parent / "run_config.json"
+        if rc_path.exists():                             # run06 round 18b: whale.winding_fix (faces wound for the engine; mesh files only)
+            model.winding_fix = bool(((json.loads(rc_path.read_text()).get("config") or {}).get("whale") or {}).get("winding_fix", False))
+            _ab = ((json.loads(rc_path.read_text()).get("config") or {}).get("whale") or {}).get("arch_bend")
+            if _ab:                                      # run06 round 20c: procedural bends about the centre line
+                model.arch_bend = dict(_ab)
+            model.apply_r20d(((json.loads(rc_path.read_text()).get("config") or {}).get("whale") or {}))   # round 20d keys
+            _wh = ((json.loads(rc_path.read_text()).get("config") or {}).get("whale") or {})
+            if _wh.get("dorsal_hump"):                   # round 20g: whale.dorsal_hump (round 20e) reaches the batch meshes too
+                model.dorsal_hump = dict(_wh["dorsal_hump"])
+            if _wh.get("obj_shared_vertices"):           # round 20g: one OBJ vertex per position at UV seams (engine normals)
+                model.obj_shared_vertices = dict(_wh["obj_shared_vertices"])
+            if _wh.get("blade_uv_match"):                # round 20g: blade UV charts placed to match the patch's base colour
+                model.blade_uv_match = dict(_wh["blade_uv_match"])
         if batch.get("blade_templates"):                 # run06 round 7: the parametric dorsal blade (as in shotlist / postprocess)
             bt = Path(batch["blade_templates"])
             from factory.whalemodel import REPO_ROOT as _R

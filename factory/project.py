@@ -174,8 +174,12 @@ def amodal_and_parts(vertices_cm: np.ndarray, faces: np.ndarray, whale: dict, ca
     return tuple(out)
 
 
+PART6_DORSAL, PART6_BODY = 2, 5          # the run06 part ids of factory.postprocess.PART6_IDS (dorsal, body)
+
+
 def animal_maps(vertices_cm: np.ndarray, faces: np.ndarray, whale: dict, camera: Camera, canonical_cm: np.ndarray,
-                vertex_parts: np.ndarray | None = None, n_parts: int = 5, blade_weight: np.ndarray | None = None) -> dict:
+                vertex_parts: np.ndarray | None = None, n_parts: int = 5, blade_weight: np.ndarray | None = None,
+                dorsal_soft: np.ndarray | None = None) -> dict:
     """Everything amodal_and_parts(extra, world_z, canonical_xyz, deformed_xyz) gives for one whale, from ONE rasterize
     pass, plus (vertex_parts: (N,) ids 1..n_parts) the per-pixel part of the run06 taxonomy: the vertex groups as one-hot
     vertex attributes, interpolated and arg-maxed, so a part boundary runs inside the faces it crosses. Keys: amodal
@@ -191,6 +195,12 @@ def animal_maps(vertices_cm: np.ndarray, faces: np.ndarray, whale: dict, camera:
     if vertex_parts is not None:
         onehot = np.zeros((len(vertices_cm), n_parts), float)
         onehot[np.arange(len(vertices_cm)), np.clip(np.asarray(vertex_parts, int) - 1, 0, n_parts - 1)] = 1.0
+        if dorsal_soft is not None:
+            # round 13 (weld): a soft dorsal / body weight on the hump patch (0.5 exactly at the hump's edge), so the
+            # interpolated boundary is the lift's iso-line and not a staircase of whole patch triangles
+            sv = np.asarray(dorsal_soft, float); ok = np.isfinite(sv)
+            onehot[ok] = 0.0
+            onehot[ok, PART6_DORSAL - 1] = sv[ok]; onehot[ok, PART6_BODY - 1] = 1.0 - sv[ok]
         cols.append(onehot)
     if blade_weight is not None:                 # run06 round 5: the dorsal blade alone (a sub-label of the fin + hump part)
         cols.append(np.asarray(blade_weight, float)[:, None])

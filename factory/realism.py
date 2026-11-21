@@ -87,24 +87,23 @@ def blade_elevation(model, geometry: np.ndarray, pitch_deg: float) -> float:
     return float(math.degrees(math.atan2(d[2], -d[0])))
 
 
-def dive(rng, model, body: dict, category: str, pose, scale: float, crest_lift_m: float, rollout_clearance=(0.3, 0.9)) -> tuple:
-    """(pose, clip_t, fluke_curl_deg, phase, top) of a dive-sequence shot (top "fluke": place by the fluke's highest point); body = the posed() keys of the shot (individual,
-    body_scale, pec_droop_deg)."""
+def dive(rng, model, body: dict, category: str, pose, scale: float, crest_lift_m: float, rollout_clearance=(0.3, 0.9),
+         opts: dict | None = None) -> tuple:
+    """(pose, clip_t, fluke_curl_deg, phase, top, params) of a dive-sequence shot (top "fluke": place by the fluke's highest
+    point; params: the procedural bend, identity unless opts asks for one); body = the posed() keys of the shot
+    (individual, body_scale, pec_droop_deg). opts = the realism section (round 18, all optional; absent = as before):
+      dive_blade_elev  8 values replacing DIVE_BLADE_ELEV (the blade angle along the dive phase)
+      rollout_bend     {"arch_deg": [lo, hi], "arch_centre": [lo, hi], "arch_span": [lo, hi], "tail_curl_deg": [lo, hi],
+                        "head_pitch_deg": [lo, hi]}: the roll-out (phase < 0.3) gets a procedural arch of the tail stock
+                        (drawn after every other draw of this function, so the old draws are unchanged)"""
+    opts = opts or {}
     lo, hi = DIVE_WINDOWS[category]
     phase = float(rng.uniform(lo, hi))
     pitch = _interp(DIVE_KNOTS, DIVE_PITCH, phase) + float(rng.uniform(-4.0, 4.0))
-    target = _interp(DIVE_KNOTS, DIVE_BLADE_ELEV, phase) + float(rng.uniform(-8.0, 8.0))
+    elev = np.asarray(opts["dive_blade_elev"], float) if opts.get("dive_blade_elev") else DIVE_BLADE_ELEV
+    target = _interp(DIVE_KNOTS, elev, phase) + float(rng.uniform(-8.0, 8.0))
     clear = _interp(DIVE_KNOTS, DIVE_CLEARANCE_M, phase) * float(rng.uniform(0.7, 1.3))
     t = round(_interp(DIVE_KNOTS, DIVE_CLIP_T, phase) + float(rng.uniform(-0.05, 0.05)), 3)
-    curl = 0.0
-    shot = dict(body, pose={"clip_t": t}, fluke_curl_deg=curl, deform=None)
-    for _ in range(3):                                   # the fluke curl that puts the blade at the target angle
-        g = model.posed(shot)
-        err = target - blade_elevation(model, g, pitch)
-        if abs(err) < 2.0:
-            break
-        curl = float(np.clip(curl + err, -120.0, 90.0))
-        shot["fluke_curl_deg"] = curl
     # roll-out: the blades just clear of the water (the arched stock stands higher); sinking: only the tips out. Both are
     # placed by the fluke's own highest point (top "fluke"), with little of the wave lift (they ride the crest)
     top = None
@@ -112,14 +111,30 @@ def dive(rng, model, body: dict, category: str, pose, scale: float, crest_lift_m
         clear, top = float(rng.uniform(*rollout_clearance)), None   # the arched stock is the top; the blades trail to the water
     elif phase > 0.78:
         clear, top = float(rng.uniform(0.05, 0.5)), "fluke"
+    params = deform.DeformParams()
+    bend = opts.get("rollout_bend")
+    if bend and phase < 0.3:                             # round 18: the tail stock arched as the flukes come up
+        params = deform.DeformParams(**{k: float(rng.uniform(*bend[k])) for k in sorted(bend)})
+    curl = 0.0
+    shot = dict(body, pose={"clip_t": t} | ({"bend": "procedural"} if not params.is_identity() else {}), fluke_curl_deg=curl,
+                deform=deform.params_to_dict(params) if not params.is_identity() else None)
+    for _ in range(3):                                   # the fluke curl that puts the blade at the target angle
+        g = model.posed(shot)
+        err = target - blade_elevation(model, g, pitch)
+        if abs(err) < 2.0:
+            break
+        curl = float(np.clip(curl + err, -120.0, 90.0))
+        shot["fluke_curl_deg"] = curl
     lift = crest_lift_m if (top is None and phase >= 0.3) else 0.25 * crest_lift_m
     pose = replace(pose, pitch_deg=pitch, clearance_m=clear * scale + lift)
-    return pose, t, round(curl, 2), round(phase, 4), top
+    return pose, t, round(curl, 2), round(phase, 4), top, params
 
 
-def surfacing(rng, category: str, pose, scale: float, crest_lift_m: float) -> tuple:
-    """(pose, DeformParams, phase, top_x (lo, hi) cm scaled) of a surfacing-roll shot."""
-    lo, hi = SURF_WINDOWS[category]
+def surfacing(rng, category: str, pose, scale: float, crest_lift_m: float, windows: dict | None = None) -> tuple:
+    """(pose, DeformParams, phase, top_x (lo, hi) cm scaled) of a surfacing-roll shot. windows (round 18, config
+    realism.surf_windows): {category: [lo, hi]} replacing SURF_WINDOWS entries (e.g. the peduncle without the last,
+    most arched part of the roll, whose end-on dome reads as a head)."""
+    lo, hi = (windows or {}).get(category) or SURF_WINDOWS[category]
     phase = float(rng.uniform(lo, hi))
     vals = {k: _interp(SURF_KNOTS, v, phase) for k, v in SURF.items()}
     params = deform.DeformParams(arch_deg=vals["arch_deg"] * float(rng.uniform(0.85, 1.15)),
@@ -138,9 +153,12 @@ def surfacing(rng, category: str, pose, scale: float, crest_lift_m: float) -> tu
     return pose, params, round(phase, 4), (top[0] * scale, top[1] * scale)
 
 
-def posed_category(rng, category: str, pose, scale: float, crest_lift_m: float) -> dict:
+def posed_category(rng, category: str, pose, scale: float, crest_lift_m: float, opts: dict | None = None) -> dict:
     """Pose, clip time, bend and fin settings of the new rig-level categories (pec_slap, head_rise, tail_slap,
-    peduncle_throw). Returns {"pose", "clip_t", "params", "pec_droop", "pec_side", "top": "pec" | None}."""
+    peduncle_throw). Returns {"pose", "clip_t", "params", "pec_droop", "pec_side", "top": "pec" | None}.
+    opts (round 18, config realism.pec_slap): {"pitch_deg": [lo, hi]} replaces the pec slap's body pitch range (-8, 8)
+    (one draw either way); "fluke_under_cm" is applied by shotlist.make_shot after the placement."""
+    opts = opts or {}
     side = float(rng.choice([-1.0, 1.0]))
     out = {"params": deform.DeformParams(), "pec_side": None, "top": None, "pec_droop": None, "clip_t": None}
     if category == "pec_slap":
@@ -149,7 +167,7 @@ def posed_category(rng, category: str, pose, scale: float, crest_lift_m: float) 
         up = float(rng.uniform(-35.0, 55.0)) - droop                 # the upper flipper: up (0) to slapping down / back (+)
         out.update(pec_droop=droop, pec_side=[up, 0.0] if roll > 0 else [0.0, up], top="pec",
                    clip_t=float(rng.choice([0.0, 0.3, 12.0])) + float(rng.uniform(-0.05, 0.05)))
-        out["pose"] = replace(pose, roll_deg=roll, pitch_deg=float(rng.uniform(-8.0, 8.0)),
+        out["pose"] = replace(pose, roll_deg=roll, pitch_deg=float(rng.uniform(*(opts.get("pitch_deg") or (-8.0, 8.0)))),
                               clearance_m=float(rng.uniform(1.0, 2.8)) * scale + 0.5 * crest_lift_m)
     elif category == "head_rise":
         out.update(clip_t=float(rng.choice([0.0, 0.3, 12.0])) + float(rng.uniform(-0.05, 0.05)), pec_droop=float(rng.uniform(-10.0, 30.0)))

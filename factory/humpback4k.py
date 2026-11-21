@@ -21,10 +21,16 @@ from factory.skinned import Rig
 NAME = "SM_Humpback4k"
 
 
-def write_obj(path: Path, groups: list[tuple[str, np.ndarray, np.ndarray, np.ndarray]], comment: str) -> list[str]:
-    """groups: (name, vertices cm project frame, faces, uv). Faces wound so the outward normal matches."""
+def write_obj(path: Path, groups: list[tuple[str, np.ndarray, np.ndarray, np.ndarray]], comment: str,
+              winding_fix: bool = False) -> list[str]:
+    """groups: (name, vertices cm project frame, faces, uv). Faces wound so the outward normal matches.
+    winding_fix (run06 round 18b, config whale.winding_fix): the faces are wound outward in the PROJECT frame, but the
+    file mirrors Y and the engine imports them with the near side culled (the inside of the far wall renders, lit through
+    inward normals); with the key each face's index order is reversed once more, after the outward check, so the engine
+    sees outward faces. Without the key the file is byte-identical to before."""
     lines = [f"# {comment}", f"mtllib {path.stem}.mtl"]
     base = 0; written = []
+    pbase_ = 0                                               # round 20g: "v" / "vn" count when positions are shared
     for group in groups:
         name, v, faces, uv = group[:4]
         normals = group[4] if len(group) > 4 else None       # run06 round 8: optional vertex normals (project frame, outward)
@@ -33,7 +39,27 @@ def write_obj(path: Path, groups: list[tuple[str, np.ndarray, np.ndarray, np.nda
         outward = np.einsum("ij,ij->i", geometric, tri.mean(1) - centre)
         if (outward < 0).mean() > 0.5:                       # outward winding in the project frame, as the K9239 OBJ is written
             faces = faces[:, [0, 2, 1]]
+        if winding_fix:
+            faces = faces[:, [0, 2, 1]]
         lines.append(f"usemtl {name}"); written.append(name)
+        pos_id = group[5] if len(group) > 5 and group[5] is not None else None
+        if pos_id is not None and normals is not None:
+            # run06 round 20g (whale.obj_shared_vertices): OBJ vertices of one position id (UV-seam copies) share ONE "v"
+            # and ONE "vn" line, their UVs stay per copy ("f p/t/p"). The engine (Interchange OBJ -> one mesh vertex per
+            # "v"; StaticMeshOperations::ComputeTangentsAndNormals smooths per mesh vertex only) then recomputes one
+            # normal across the seam instead of one per side.
+            pos_id = np.asarray(pos_id, int)
+            uniq, first, pinv = np.unique(pos_id, return_index=True, return_inverse=True)
+            pinv = pinv.ravel()
+            lines.extend(f"v {x:.4f} {-y:.4f} {z:.4f}" for x, y, z in v[first])
+            lines.extend(f"vt {u:.6f} {1.0 - t:.6f}" for u, t in uv)
+            lines.extend(f"vn {x:.5f} {-y:.5f} {z:.5f}" for x, y, z in normals[first])
+            pb = pbase_ + 1
+            for (a, b, c), (ta, tb, tc) in zip(pinv[faces] + pb, faces + base + 1):
+                lines.append(f"f {a}/{ta}/{a} {b}/{tb}/{b} {c}/{tc}/{c}")
+            base += len(v); pbase_ += len(uniq)
+            continue
+        pbase_ += len(v)
         lines.extend(f"v {x:.4f} {-y:.4f} {z:.4f}" for x, y, z in v)
         lines.extend(f"vt {u:.6f} {1.0 - t:.6f}" for u, t in uv)
         if normals is not None:

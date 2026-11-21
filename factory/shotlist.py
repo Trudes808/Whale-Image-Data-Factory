@@ -185,6 +185,14 @@ def sample_lighting(rng: np.random.Generator, config: dict, camera_yaw: float) -
     relative = rng.uniform(0.0, 360.0)
     sun_yaw = (camera_yaw + 180.0 + relative) % 360.0  # the light's forward vector points *from* the sun
     intensity = rng.uniform(*(light["overcast_intensity"] if overcast else light["clear_intensity"]))
+    if overcast and light.get("overcast_sun_elevation_deg"):
+        # run06 round 20b: the overcast "sun" (a trace that also drives the sky atmosphere) stands near the zenith, so the
+        # grey sky has no bright side and its reflection no longer depends on where the camera looks. The drawn elevation
+        # is mapped linearly from the clear-sky range into [lo, hi] (no extra draw: the shot list's random stream is unchanged).
+        q = light.get("sun_elevation_quantiles")
+        e0, e1 = (q[0][1], q[-1][1]) if q else tuple(light["sun_elevation_deg"])
+        lo, hi = light["overcast_sun_elevation_deg"]
+        elevation = lo + (min(max(elevation, e0), e1) - e0) / max(e1 - e0, 1e-6) * (hi - lo)
     sun = {"pitch": round(-elevation, 2), "yaw": round(sun_yaw, 2), "intensity": round(intensity, 2),
            "elevation_deg": round(elevation, 2), "relative_azimuth_deg": round(relative, 2)}
     fog_lo, fog_hi = light["fog_density"]
@@ -305,10 +313,11 @@ def sample_companion(rng: np.random.Generator, config: dict, model, category: st
 
 
 def make_shot(index: int, rng: np.random.Generator, config: dict, vertices_cm: np.ndarray,
-              fin_regions: dict | None = None, model: WhaleModel | None = None) -> dict:
+              fin_regions: dict | None = None, model: WhaleModel | None = None, category: str | None = None) -> dict:
     cycle = config.get("pose_cycle")                 # review renders: after the individual cycle, categories in turn
     n_cycle = max(1, len([k for k in model.individuals() if k.startswith("i")])) if (cycle and model is not None and config.get("individual_cycle")) else 1
-    category, pose = sample_pose(rng, config, name=cycle[(index // n_cycle) % len(cycle)] if cycle else None)
+    # round 17b: category given = a re-draw of this shot in the same pose family (weld_redraw)
+    category, pose = sample_pose(rng, config, name=category or (cycle[(index // n_cycle) % len(cycle)] if cycle else None))
     clip_t = sample_clip_time(rng, category) if (model is not None and model.kind == "humpback4k") else None
     if clip_t is not None and pose.pitch_deg < 0 and category not in poses.BACK_HEIGHT_CATEGORIES and category not in HEAD_UNDER_CATEGORIES:
         # tail-up categories: the keyframe already lifts the fluke; take most of that out of the nose-down pitch
@@ -381,15 +390,16 @@ def make_shot(index: int, rng: np.random.Generator, config: dict, vertices_cm: n
         crest = lift * seastate.crest_height_m(sea) if lift > 0 else 0.0
         body_keys = {"individual": individual, "body_scale": scale, "pec_droop_deg": pec_droop}
         if rz.cfg(config).get("sequences") and category in rz.DIVE_WINDOWS:
-            pose, clip_t, fluke_curl, rz_info["phase"], rz_info["top"] = rz.dive(rng, model, body_keys, category, pose, scale, crest,
-                                                                                   rollout_clearance=tuple((config.get("realism") or {}).get("rollout_clearance_m", (0.3, 0.9))))
-            params = deform.DeformParams(); procedural_bend = False
+            pose, clip_t, fluke_curl, rz_info["phase"], rz_info["top"], params = rz.dive(rng, model, body_keys, category, pose, scale, crest,
+                                                                                           rollout_clearance=tuple((config.get("realism") or {}).get("rollout_clearance_m", (0.3, 0.9))),
+                                                                                           opts=rz.cfg(config))
+            procedural_bend = not params.is_identity()         # round 18: realism.rollout_bend arches the stock (else none)
         elif rz.cfg(config).get("sequences") and category in rz.SURF_WINDOWS:
-            pose, params, rz_info["phase"], rz_info["top_x"] = rz.surfacing(rng, category, pose, scale, crest)
+            pose, params, rz_info["phase"], rz_info["top_x"] = rz.surfacing(rng, category, pose, scale, crest, rz.cfg(config).get("surf_windows"))
             procedural_bend = True
             clip_t = round(float(rng.uniform(0.2, 0.45)), 3)          # a straight keyframe under the procedural roll
         elif category in ("pec_slap", "head_rise", "tail_slap", "peduncle_throw"):
-            o = rz.posed_category(rng, category, pose, scale, crest)
+            o = rz.posed_category(rng, category, pose, scale, crest, rz.cfg(config).get(category) if category == "pec_slap" else None)
             pose, clip_t, params = o["pose"], round(float(o["clip_t"]), 3), o["params"]
             pec_droop = round(float(o["pec_droop"]), 2) if o["pec_droop"] is not None else pec_droop
             pec_side = [round(float(v), 2) for v in o["pec_side"]] if o["pec_side"] else None
@@ -424,6 +434,28 @@ def make_shot(index: int, rng: np.random.Generator, config: dict, vertices_cm: n
             if (world_h[:, 2] > 0.0).mean() < 0.01:
                 break
             pose = replace(pose, pitch_deg=pose.pitch_deg - 6.0)
+            placed = poses.place(geometry, pose, top_mask=top_mask)
+    under = ((config.get("realism") or {}).get("pec_slap") or {}).get("fluke_under_cm") if (rz_info is not None and category == "pec_slap") else None
+    if under is not None:
+        # round 18 (config realism.pec_slap.fluke_under_cm): on its side the upper fluke blade (and the head) stand out of
+        # the water and read as a fin, a flipper or a head; only the flipper should show. Tilt the body (nose up sinks the
+        # tail, nose down the head) and, when both are out, lower the flipper's clearance, until fluke and head are this
+        # far under the mean water plane (the flipper stays placed by its own top)
+        grp = model.part_groups(); fl, hd = grp["fluke"], grp["head"]
+        floor_m = 0.35 * scale
+        for _ in range(16):
+            w_ = transform_mesh(geometry, placed["whale"])
+            f_out = float(w_[fl][:, 2].max()) > -float(under); h_out = float(w_[hd][:, 2].max()) > -float(under)
+            if not f_out and not h_out:
+                break
+            if f_out and not h_out:
+                pose = replace(pose, pitch_deg=pose.pitch_deg + 3.0)
+            elif h_out and not f_out:
+                pose = replace(pose, pitch_deg=pose.pitch_deg - 3.0)
+            elif pose.clearance_m - 0.2 >= floor_m:
+                pose = replace(pose, clearance_m=pose.clearance_m - 0.2)
+            else:
+                break
             placed = poses.place(geometry, pose, top_mask=top_mask)
     world = transform_mesh(geometry, placed["whale"])
     scene = None
@@ -634,6 +666,16 @@ def make_shot(index: int, rng: np.random.Generator, config: dict, vertices_cm: n
         rz.water_detail(shot, water)
     if rz_info is not None and (config.get("realism") or {}).get("ocean_scalars"):
         shot["ocean"].setdefault("scalars", {}).update(config["realism"]["ocean_scalars"])   # run06 realism: weaker mirror reflection
+    oc_ocean = (config.get("realism") or {}).get("overcast_ocean") if rz_info is not None else None
+    if oc_ocean and shot.get("overcast"):
+        # run06 round 20b: overcast water (batches of their own, realism.overcast_batch): its own scattering / albedo
+        # vectors and a rougher, matte surface (scalars multiplied by scalars_scale)
+        shot["ocean"].setdefault("vectors", {}).update(oc_ocean.get("vectors") or {})
+        sc = shot["ocean"].setdefault("scalars", {})
+        sc.update(oc_ocean.get("scalars") or {})
+        for key, k in (oc_ocean.get("scalars_scale") or {}).items():
+            if key in sc:
+                sc[key] = round(float(sc[key]) * float(k), 4)
     if rz_info is not None:
         from factory import realism as rz
         rz_info["hard"] = rz.hard_tags(shot, rz_info.get("end_on", False))
@@ -699,16 +741,19 @@ def posed_world(shot: dict, vertices_cm: np.ndarray, fin_regions: dict | None, m
     return transform_mesh(geometry, shot["whale"])
 
 
-def make_batches(shots: list[dict], batch_size: int) -> list[dict]:
+def make_batches(shots: list[dict], batch_size: int, split_overcast: bool = False) -> list[dict]:
     # Waves and the ocean material are applied once per batch (wf_build_batch), from the first
     # shot, so everything that varies them must be part of the grouping key: sea state, look and
     # the focal-length normal-strength scale (binned to 0.1).
+    # run06 round 19 (split_overcast, from realism.overcast_batch): overcast shots in batches of their own, since the sky
+    # (atmosphere, sky light) is set per batch.
     groups: dict[tuple, list] = {}
     for shot in shots:
         scale_bin = round(float(shot.get("ocean", {}).get("normal_strength_scale", 1.0)), 1)
-        groups.setdefault((shot["sea_state"], shot["look"], scale_bin), []).append(shot)
+        key = (shot["sea_state"], shot["look"], scale_bin) + ((bool(shot.get("overcast")),) if split_overcast else ())
+        groups.setdefault(key, []).append(shot)
     batches = []
-    for (sea, look, scale_bin), members in sorted(groups.items()):
+    for (sea, look, scale_bin, *_), members in sorted(groups.items()):
         for start in range(0, len(members), batch_size):
             chunk = members[start:start + batch_size]
             batches.append({
@@ -721,6 +766,82 @@ def make_batches(shots: list[dict], batch_size: int) -> list[dict]:
                 "shots": chunk,
             })
     return batches
+
+
+# ---- run06 round 17b (weld design 15): no whale whose posed weld still self-intersects ------------------------------
+REDRAW_MAX = 5                       # re-draws of a shot with a flagged whale; then the shot is dropped (counted)
+_RD_MODEL = None
+
+
+def _rd_whales(shot: dict) -> list:
+    """(label, whale record) of every animal of a shot: the shot itself is animal 1, then its companions."""
+    out = [("a1", shot)] if shot.get("individual") is not None or shot.get("whale_kind") == "humpback4k" else []
+    for c in shot.get("companions") or []:
+        out.append((f"a{c.get('instance_id')}", c))
+    return out
+
+
+def _rd_test(shot: dict) -> list:
+    """Pose every animal of the shot as the render will (model.posed) and read the weld's pose info."""
+    m = _RD_MODEL
+    res = []
+    for lab, w in _rd_whales(shot):
+        m.posed(w)
+        info = dict(m.__dict__.get("_weld_pose_info") or {})
+        res.append((lab, info.get("mode"), bool(info.get("intersects")), info.get("n_foot"), info.get("n_r16")))
+    return res
+
+
+def weld_redraw(shots: list[dict], seed: int, config: dict, vertices, regions, model, workers: int = 8) -> tuple[list[dict], dict]:
+    """Every animal of every shot is posed and tested (factory.weld15.posed's gate: weld_check's intersection test).
+    A shot with an animal that still self-intersects is made again (make_shot, same index and pose family, rng
+    [seed, index, 1000 + draw]), up to REDRAW_MAX times, until none of its animals intersects; the re-made shot and
+    each of its animals carry "weld_pose" = {"mode", "redraws"}. After REDRAW_MAX failed draws the shot is dropped.
+    Shots without a flagged animal are returned unchanged (the same objects). Returns (shots, stats)."""
+    global _RD_MODEL
+    import time
+    from multiprocessing import get_context
+    t0 = time.time()
+    _RD_MODEL = model
+    with get_context("fork").Pool(max(1, workers)) as pool:
+        tests = pool.map(_rd_test, shots, chunksize=2)
+    fam = lambda s: ((s.get("pose") or {}).get("description") or s.get("category") or "?")[:60]
+    stats = {"shots_in": len(shots), "whales": 0, "second_try": 0, "flagged": 0, "redrawn_shots": 0, "dropped_shots": 0,
+             "draws": [], "by_family": {}}
+
+    def bump(f, key, n=1):
+        stats["by_family"].setdefault(f, {"whales": 0, "second_try": 0, "flagged": 0, "redrawn": 0, "fallback": 0})[key] += n
+    out = []
+    for i, (shot, res) in enumerate(zip(shots, tests)):
+        for lab, mode, bad, n1, n2 in res:
+            stats["whales"] += 1; bump(fam(shot), "whales")
+            if n1:
+                stats["second_try"] += 1; bump(fam(shot), "second_try")
+            if bad:
+                stats["flagged"] += 1; bump(fam(shot), "flagged")
+        if not any(r[2] for r in res):
+            out.append(shot)
+            continue
+        idx = int(shot["id"]) if str(shot["id"]).isdigit() else i
+        new = None
+        for d in range(1, REDRAW_MAX + 1):
+            cand = make_shot(idx, np.random.default_rng([seed, idx, 1000 + d]), config, vertices, regions, model, category=shot["category"])
+            r2 = _rd_test(cand)
+            if not any(r[2] for r in r2):
+                modes = {lab: mode for lab, mode, _, _, _ in r2}
+                cand["weld_pose"] = {"mode": modes.get("a1"), "redraws": d}
+                for c in cand.get("companions") or []:
+                    c["weld_pose"] = {"mode": modes.get(f"a{c.get('instance_id')}"), "redraws": d}
+                new = cand
+                stats["draws"].append(d)
+                break
+        if new is None:
+            stats["dropped_shots"] += 1; bump(fam(shot), "fallback")
+            continue
+        stats["redrawn_shots"] += 1; bump(fam(shot), "redrawn")
+        out.append(new)
+    stats["seconds"] = round(time.time() - t0, 1)
+    return out, stats
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -738,6 +859,15 @@ def main(argv: list[str] | None = None) -> int:
     rng = np.random.default_rng(args.seed)
     shots = [make_shot(i, rng, config, vertices, regions, model if model.kind != "k9239" else None) for i in range(args.count)]
     args.out_dir.mkdir(parents=True, exist_ok=True)
+    if getattr(model, "weld_design", 13) == 15:              # round 17b: re-draw shots whose welded fin still intersects
+        import os
+        shots, rd_stats = weld_redraw(shots, args.seed, config, vertices, regions, model, int(os.environ.get("WF_SHOTLIST_WORKERS", "8")))
+        (args.out_dir / "weld_redraw.json").write_text(json.dumps(rd_stats, indent=1))
+        print("weld re-draw:", {k: v for k, v in rd_stats.items() if k not in ("by_family", "draws")})
+    if config.get("boat_scene"):                             # round 20f: boat rail / deck / land markers and corners (own rng)
+        from factory import boat_scene
+        shots, b20 = boat_scene.apply(shots, config, args.out_dir, args.seed)
+        (args.out_dir / "boat20_apply.json").write_text(json.dumps(b20, indent=1)); print("boat20:", b20)
     for shot in shots:
         splash.ensure_obj(shot.get("splash"), args.out_dir / "splash", shot["id"])
         if shot.get("whitewater"):
@@ -760,7 +890,8 @@ def main(argv: list[str] | None = None) -> int:
             handle.write(json.dumps(shot) + "\n")
     batch_dir = args.out_dir / "batches"
     batch_dir.mkdir(exist_ok=True)
-    batches = make_batches(shots, config["batch_size"])
+    overcast_batch = (config.get("realism") or {}).get("overcast_batch")      # run06 round 19 (absent: as before)
+    batches = make_batches(shots, config["batch_size"], split_overcast=bool(overcast_batch))
     library = islands.make_library(args.out_dir / "islands", np.random.default_rng(args.seed + 7919), config["islands"].get("library", 6)) if config.get("islands") else []
     for batch in batches:
         batch["resolution"] = config["resolution"]
@@ -777,6 +908,9 @@ def main(argv: list[str] | None = None) -> int:
             batch["ridge_soften"] = float(config["whale"]["ridge_soften"])
         if (config.get("whale") or {}).get("blade_templates"):     # run06 round 7: and the same parametric blade
             batch["blade_templates"] = config["whale"]["blade_templates"]
+        if (config.get("whale") or {}).get("blade_weld"):          # run06 round 12: welded into the back (factory.weld)
+            from factory import weld as _wd                       # round 15: the design travels with the batch (15; true = 13)
+            batch["blade_weld"] = 15 if _wd.design_of(config["whale"]["blade_weld"]) == 15 else True
         if config.get("grade"):                               # run06 realism: camera picture style (wf_shot.apply_grade)
             batch["grade"] = dict(config["grade"])
         for key in ("clouds", "fog_batch", "skin_look", "skin_bake"):   # run06 realism round 2/3/8: sky without cumulus, hazy horizon, skin (wf_shot)
@@ -784,6 +918,12 @@ def main(argv: list[str] | None = None) -> int:
                 batch[key] = config[key]
         if config["camera"].get("filmback_mm"):              # run06 realism: 3:2 filmback (wf_build_batch)
             batch["filmback_mm"] = list(config["camera"]["filmback_mm"])
+        if overcast_batch and batch["shots"][0].get("overcast"):
+            # run06 round 19: an overcast batch's sky (grey, bright sky light; the sun is a trace per shot): its sections
+            # merged over the run's (dicts one level, as wf_shot reads them)
+            for key, values in overcast_batch.items():
+                batch[key] = {**(batch.get(key) or {}), **values} if isinstance(values, dict) else values
+            batch["overcast"] = True
         (batch_dir / f"batch_{batch['index']:03d}.json").write_text(json.dumps(batch))
     categories = {}
     for shot in shots:

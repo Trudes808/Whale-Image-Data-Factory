@@ -318,6 +318,9 @@ def shot_geometry(shot: dict, vertices: np.ndarray, faces: np.ndarray) -> tuple:
     """The shot's whale in its own frame: (posed geometry, canonical vertices, faces, scaled undeformed base)."""
     scale = float(shot.get("body_scale", 1.0))
     if MODEL is not None and MODEL.kind != "k9239":
+        if getattr(MODEL, "weld", None) is not None:           # run06 round 12: the welded patch differs per animal
+            can = MODEL.canonical_for(shot.get("individual"))
+            return MODEL.posed(shot), can, MODEL.faces, can * scale
         return MODEL.posed(shot), MODEL.canonical, MODEL.faces, MODEL.canonical * scale
     params = deform.params_from_dict(shot.get("deform"))
     base = vertices * scale if abs(scale - 1.0) > 1e-6 else vertices
@@ -375,6 +378,20 @@ def _relabel_worker(job: tuple) -> dict:
 
 
 QUALITY_GATE: dict | None = None   # config "quality_gate" (run06 realism): reject shots a photographer would not keep
+DROP_ISOLATED = False   # config labels.drop_isolated_instance_pixels (run06, round 11): drop single instance pixels with no 8-neighbour of their id
+
+
+def drop_isolated_pixels(inst: np.ndarray) -> np.ndarray:
+    """Instance pixels with no 8-neighbour of the same id (a lone decode artefact, e.g. on the frame's last row) -> 0."""
+    from scipy import ndimage
+    out = inst.copy()
+    for k in np.unique(inst):
+        if k == 0:
+            continue
+        m = inst == k
+        nb = ndimage.convolve(m.astype(np.uint8), np.ones((3, 3), np.uint8), mode="constant") - m
+        out[m & (nb == 0)] = 0
+    return out
 
 
 def quality_gate(image_path: Path, inst: np.ndarray, projection_covered, shot: dict) -> dict:
@@ -525,14 +542,25 @@ def _fin_spec(individual) -> dict | None:
         # round 7: the generated blade's own outline in its fin frame (a along the base from the back base, in units of
         # the height H; levels h = 0..1) and its shape numbers, from the blade mesh itself
         from factory import blade as bl
-        V = MODEL._blade_local(individual)["vertices"]
+        loc = MODEL._blade_local(individual)
+        V = loc["vertices"]
         H = float(spec.get("blade_H_cm", 45.0)) if spec.get("blade_template", -1) >= 0 else 45.0
         R2 = 2 * bl.NC
-        lv = [(float(h), float(V[k * R2:(k + 1) * R2, 0].min() / H), float(V[k * R2:(k + 1) * R2, 0].max() / H))
-              for k, h in enumerate(bl.LEVELS) if h >= 0.0]
+        if "outline" in loc:          # round 12 (weld): the template outline at the standard levels (the same numbers)
+            o = loc["outline"]
+            lv = [(float(h), float(t), float(l)) for h, t, l in zip(o["levels"], o["te"], o["le"]) if h >= 0.0]
+        else:
+            lv = [(float(h), float(V[k * R2:(k + 1) * R2, 0].min() / H), float(V[k * R2:(k + 1) * R2, 0].max() / H))
+                  for k, h in enumerate(bl.LEVELS) if h >= 0.0]
         hs = np.array([x[0] for x in lv]); tr = np.array([x[1] for x in lv]); le = np.array([x[2] for x in lv])
         c75, c90 = float(np.interp(0.75, hs, le - tr)), float(np.interp(0.9, hs, le - tr))
-        out["blade"] = {"template": spec.get("blade_template"), "H_cm": round(H, 2), "base_over_height": round(float(le[0] - tr[0]), 3),
+        base_oh = float(le[0] - tr[0])
+        if getattr(MODEL, "weld", None) is not None:
+            # round 13: the welded mesh's own base (front-base to back-base landmark along the fin frame, / H): the
+            # keypoints and the picture show the mesh, whose lifted hump reaches beyond the template's base points
+            base_oh = MODEL.weld_base_over_height(individual)
+        out["blade"] = {"template": spec.get("blade_template"), "H_cm": round(H, 2), "base_over_height": round(base_oh, 3),
+                        "base_over_height_template": round(float(le[0] - tr[0]), 3),
                         "broad": round(c75, 3), "sharp": round(c90 / max(c75, 1e-6), 3), "overhang": round(float(np.interp(0.75, hs, tr)), 3),
                         "hump_front_slope_over_height": round(float(le[0] - np.interp(0.5, hs, le)), 3),
                         "outline": {"h": [round(x, 3) for x in hs], "trail": [round(x, 3) for x in tr], "lead": [round(x, 3) for x in le]}}
@@ -627,6 +655,8 @@ def process_shot(shot: dict, raw_dir: Path, frame: int, out: Path, vertices: np.
     animals = animals_of(shot)
     n = len(animals)
     inst, decode_stats = decode_label(label_path, label_encoding or LABEL_ENCODING_LEGACY, n)
+    if DROP_ISOLATED:
+        inst = drop_isolated_pixels(inst)
     mask = inst == 1
     camera = project.Camera(shot["camera"]["location"], shot["camera"]["rotation"], shot["camera"]["focal_mm"], width, height)
     scale = float(shot.get("body_scale", 1.0))
@@ -638,14 +668,20 @@ def process_shot(shot: dict, raw_dir: Path, frame: int, out: Path, vertices: np.
         geometry, canon_v, faces_a, base = shot_geometry(a, vertices, faces)
         geoms.append((geometry, canon_v, base))
         blade = None
+        vparts_a = vparts
+        if vparts is not None and getattr(MODEL, "weld", None) is not None:        # round 12: per animal (hump patch)
+            vparts_a = MODEL.vertex_part_ids(a.get("individual"))
         if MODEL is not None and getattr(MODEL, "landmarks_v2", False) and vparts is not None:
-            if getattr(MODEL, "n_rig", None) is not None and len(vparts) == len(geometry):     # round 7: the parametric blade
+            if getattr(MODEL, "weld", None) is not None:
+                blade = MODEL.blade_weight(a.get("individual"))
+            elif getattr(MODEL, "n_rig", None) is not None and len(vparts) == len(geometry):     # round 7: the parametric blade
                 blade = (np.arange(len(geometry)) >= MODEL.n_rig).astype(float)
             else:
                 fin = MODEL.dorsal_fin()                 # run06 round 5: the blade alone, inside the fin + hump part
                 if fin and len(fin["w"]) == len(geometry):
                     blade = ((np.asarray(fin["w"]) > 0.5) & (vparts == 2)).astype(float)
-        maps.append(project.animal_maps(geometry, faces_a, a["whale"], camera, canon_v, vparts, blade_weight=blade))
+        soft = MODEL.weld_dorsal_soft(a.get("individual")) if (vparts is not None and getattr(MODEL, "weld", None) is not None) else None
+        maps.append(project.animal_maps(geometry, faces_a, a["whale"], camera, canon_v, vparts_a, blade_weight=blade, dorsal_soft=soft))
     zstack = np.stack([m["zbuf"] for m in maps])
     zall = zstack.min(0)
     front = np.where(np.isfinite(zall), np.argmin(zstack, axis=0) + 1, 0).astype(np.uint8)    # nearest whale surface, water ignored
@@ -890,6 +926,9 @@ def process_shot(shot: dict, raw_dir: Path, frame: int, out: Path, vertices: np.
                   "bodycoords": f"bodycoords/{shot_id}.png", "depth": f"depth/{shot_id}.png", "instances": f"instances/{shot_id}.png",
                   "animals": f"animals/{shot_id}.npz"} | ({"parts": f"parts/{shot_id}.png"} if part_map is not None else {}),
     })
+    if shot.get("boat20") is not None:          # round 20f: scene classes (boat rail / tape / deck / cleat / pontoon, land), additive
+        from factory import boat_scene
+        boat_scene.add_scene_labels(meta, shot, raw_dir, inst, label, camera, out)
     (out / "meta" / f"{shot_id}.json").write_text(json.dumps(meta, indent=1))
     return meta
 
@@ -968,9 +1007,10 @@ def _load_model(run_config: dict):
 
 
 def _init_worker(run_dir: str, mesh: str, depth_m: float, camera_fx: dict | None = None, run_config: dict | None = None) -> None:
-    global CAMERA_FX, MODEL, DENSE_BODY_MAPS, IMAGES_FROM, QUALITY_GATE
+    global CAMERA_FX, MODEL, DENSE_BODY_MAPS, IMAGES_FROM, QUALITY_GATE, DROP_ISOLATED
     CAMERA_FX = camera_fx
     QUALITY_GATE = (run_config or {}).get("config", {}).get("quality_gate")
+    DROP_ISOLATED = bool(((run_config or {}).get("config", {}).get("labels") or {}).get("drop_isolated_instance_pixels", False))
     IMAGES_FROM = Path(os.environ["WF_IMAGES_FROM"]) if os.environ.get("WF_IMAGES_FROM") else None
     DENSE_BODY_MAPS = bool(((run_config or {}).get("config", {}).get("storage") or {}).get("dense_body_maps", True))
     MODEL = _load_model(run_config or {})
@@ -1075,9 +1115,10 @@ def main(argv: list[str] | None = None) -> int:
     run_config = json.loads((args.run_dir / "run_config.json").read_text())
     mesh = args.mesh or Path(run_config["mesh"])
     depth_m = float(run_config.get("config", {}).get("labels", {}).get("through_water_depth_m", THROUGH_WATER_DEPTH_M))
-    global CAMERA_FX, DENSE_BODY_MAPS, IMAGES_FROM, QUALITY_GATE
+    global CAMERA_FX, DENSE_BODY_MAPS, IMAGES_FROM, QUALITY_GATE, DROP_ISOLATED
     CAMERA_FX = run_config.get("config", {}).get("camera_fx") or None
     QUALITY_GATE = run_config.get("config", {}).get("quality_gate")
+    DROP_ISOLATED = bool((run_config.get("config", {}).get("labels") or {}).get("drop_isolated_instance_pixels", False))
     DENSE_BODY_MAPS = bool((run_config.get("config", {}).get("storage") or {}).get("dense_body_maps", True))
     if args.dense_body_maps != "config":
         DENSE_BODY_MAPS = args.dense_body_maps == "on"

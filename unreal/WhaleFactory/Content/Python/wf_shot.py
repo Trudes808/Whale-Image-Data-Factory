@@ -176,7 +176,11 @@ def apply_camera(camera: unreal.Actor, spec: dict) -> None:
 # since the material instance is saved and would otherwise carry one batch's values into the next.
 OCEAN_SCALAR_DEFAULTS = {"Water Specular": 0.225, "Water Fresnel Specular": 0.225,
                          # run06 realism round 2 (reflection blur, ripple size): the plugin material's own values
-                         "Water Fresnel Roughness": 0.1, "Default Near Water Scale": 512.0}
+                         "Water Fresnel Roughness": 0.1, "Default Near Water Scale": 512.0,
+                         # run06 round 20b: far-water tiling scale (radial fans at the horizon), the plugin's value
+                         "Default Distant Water Scale": 3500.0,
+                         # run06 round 20b: the water's Fresnel exponent (the material's name has two spaces), as built
+                         "Water Fresnel  Exponenth": 9.0}
 
 
 def apply_ocean_look(spec: dict, instance_path: str = OCEAN_MATERIAL_INSTANCE) -> None:
@@ -579,11 +583,35 @@ def apply_clouds(spec) -> None:
         log("clouds off")
 
 
+SKYLIGHT_DEFAULTS_FILE = PROJECT_DIR / "Saved" / "wf_skylight_defaults.json"
+
+
 def apply_sky_light(spec: dict | None) -> None:
     """run06 realism: the sky light's intensity (fill on the shaded side of the whale); 1.0 (as built) otherwise."""
     actor = find_actor("SkyLight")
     comp = actor.get_component_by_class(unreal.SkyLightComponent)
     comp.set_editor_property("intensity", float((spec or {}).get("sky_light_intensity", 1.0)))
+    # run06 round 18: light from below the horizon and the lights' bounce (Lumen GI). The level's as-built values are
+    # recorded once (Saved/wf_skylight_defaults.json, before any change) and restored for every batch without the keys,
+    # so nothing persists in the saved level.
+    sun = find_actor(SUN_LABEL).get_component_by_class(unreal.DirectionalLightComponent)
+    if SKYLIGHT_DEFAULTS_FILE.exists():
+        d = json.loads(SKYLIGHT_DEFAULTS_FILE.read_text())
+    else:
+        c = comp.get_editor_property("lower_hemisphere_color")
+        d = {"lower_is_black": bool(comp.get_editor_property("lower_hemisphere_is_black")), "lower_color": [c.r, c.g, c.b],
+             "sky_indirect": float(comp.get_editor_property("indirect_lighting_intensity")),
+             "sun_indirect": float(sun.get_editor_property("indirect_lighting_intensity"))}
+        SKYLIGHT_DEFAULTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        SKYLIGHT_DEFAULTS_FILE.write_text(json.dumps(d))
+        log(f"sky light defaults recorded {d}")
+    lower = (spec or {}).get("sky_lower_hemisphere")
+    comp.set_editor_property("lower_hemisphere_is_black", True if lower is not None else d["lower_is_black"])
+    comp.set_editor_property("lower_hemisphere_color", unreal.LinearColor(*[float(x) for x in (lower if lower is not None else d["lower_color"])], 1.0))
+    comp.set_editor_property("indirect_lighting_intensity", float((spec or {}).get("sky_indirect_intensity", d["sky_indirect"])))
+    sun.set_editor_property("indirect_lighting_intensity", float((spec or {}).get("sun_indirect_intensity", d["sun_indirect"])))
+    if spec and any(k in spec for k in ("sky_lower_hemisphere", "sky_indirect_intensity", "sun_indirect_intensity")):
+        log(f"sky light round 18: lower {lower} sky_indirect {spec.get('sky_indirect_intensity')} sun_indirect {spec.get('sun_indirect_intensity')}")
 
 
 def apply_sun(spec: dict) -> None:
@@ -676,15 +704,18 @@ def _custom(material, code: str, inputs: list[str], out_type, x: int, y: int, de
 
 
 def _foam_material(path: str, alpha_hlsl: str, masked: bool, colour_hlsl: str | None, emissive, roughness: float, opacity_default: float,
-                   tile_cm: float, clip: float | None = None):
+                   tile_cm: float, clip: float | None = None, lighting_mode: str | None = None):
     """Translucent (or masked twin) material: opacity = alpha_hlsl(UV, Tex, N1, Opacity) with the foam
-    texture sampled in world space (tile_cm per repeat) and a world-space value noise (80 cm)."""
+    texture sampled in world space (tile_cm per repeat) and a world-space value noise (80 cm).
+    lighting_mode (run06 round 19): a TranslucencyLightingMode name (e.g. TLM_SURFACE_PER_PIXEL_LIGHTING); None = as built."""
     name = path.rsplit("/", 1)[1]
     if unreal.EditorAssetLibrary.does_asset_exist(path):
         unreal.EditorAssetLibrary.delete_asset(path)
     tools = unreal.AssetToolsHelpers.get_asset_tools()
     material = tools.create_asset(name, SPRAY_DIR, unreal.Material, unreal.MaterialFactoryNew())
     material.set_editor_property("blend_mode", unreal.BlendMode.BLEND_MASKED if masked else unreal.BlendMode.BLEND_TRANSLUCENT)
+    if lighting_mode and not masked:
+        material.set_editor_property("translucency_lighting_mode", getattr(unreal.TranslucencyLightingMode, lighting_mode))
     material.set_editor_property("two_sided", True)
     if masked:
         material.set_editor_property("opacity_mask_clip_value", clip if clip is not None else FOAM_COVERAGE_ALPHA)
@@ -773,6 +804,32 @@ def foam_opacity_instances(opacity: float) -> tuple:
     return tuple(paths)
 
 
+def foam_lit_instance(lit: dict, opacity: float) -> str:
+    """run06 round 19 (white-water spec "foam_lit": {"mode": TranslucencyLightingMode name, "emissive": [r, g, b]}): the foam
+    carpet as M_Foam (same opacity shape, colour, roughness) but lit per pixel, so the sun lights it like the skin and the
+    water, and with its own constant glow (M_Foam's is 0.18). One material per (mode, glow), an opacity instance of it."""
+    import hashlib
+    mode = str(lit.get("mode", "TLM_SURFACE_PER_PIXEL_LIGHTING"))
+    glow = tuple(float(x) for x in lit.get("emissive", (0.18, 0.185, 0.2)))
+    key = hashlib.md5(json.dumps([mode, [round(x, 4) for x in glow]]).encode()).hexdigest()[:6]
+    path = f"{SPRAY_DIR}/M_FoamLit_{key}"
+    if not unreal.EditorAssetLibrary.does_asset_exist(path):
+        ensure_foam_texture()
+        _foam_material(path, FOAM_ALPHA_HLSL, False, FOAM_COLOUR_HLSL, glow, 0.8, 0.95, FOAM_TILE_CM, lighting_mode=mode)
+        log(f"made M_FoamLit_{key}: {mode} glow {glow}")
+    name = f"MI_FoamLit_{key}_o{int(round(opacity * 100)):02d}"
+    ipath = f"{SPRAY_DIR}/{name}"
+    if not unreal.EditorAssetLibrary.does_asset_exist(ipath):
+        mi = unreal.AssetToolsHelpers.get_asset_tools().create_asset(name, SPRAY_DIR, unreal.MaterialInstanceConstant,
+                                                                     unreal.MaterialInstanceConstantFactoryNew())
+        unreal.MaterialEditingLibrary.set_material_instance_parent(mi, unreal.EditorAssetLibrary.load_asset(path))
+        unreal.MaterialEditingLibrary.set_material_instance_scalar_parameter_value(mi, "Opacity", float(opacity))
+        unreal.MaterialEditingLibrary.update_material_instance(mi)
+        unreal.EditorAssetLibrary.save_asset(ipath, only_if_is_dirty=False)
+        log(f"made {name}")
+    return ipath
+
+
 def apply_whitewater(spec: dict | None, label: str = "shot", hidden: bool = False) -> list:
     """Import a shot's white-water meshes: the foam carpet (visible + coverage twin, like a splash)
     and the aerated-water cloud (visible only; it is under the surface). Returns the actors."""
@@ -783,7 +840,10 @@ def apply_whitewater(spec: dict | None, label: str = "shot", hidden: bool = Fals
     actors = []
     foam, foamc = FOAM_MATERIAL, FOAM_COVERAGE_MATERIAL
     opacity = spec.get("foam_opacity")
-    if opacity is not None:                     # run06 realism round 2: thinner foam (instances of both twins, same opacity)
+    lit = spec.get("foam_lit")
+    if lit:                                     # run06 round 19: the visible foam lit per pixel (the label twin unchanged)
+        foam = foam_lit_instance(lit, float(opacity) if opacity is not None else 0.95)
+    elif opacity is not None:                   # run06 realism round 2: thinner foam (instances of both twins, same opacity)
         foam, _ = foam_opacity_instances(float(opacity))
         # round 5: the label twin keeps the base coverage material, so dense foam cores hide the whale in the labels
         # however thin the visible foam is drawn (a thin visible foam with a twin of the same opacity never covered,
@@ -1017,23 +1077,37 @@ def clear_whale_variants() -> None:
 
 
 SKIN_BAKE_MATERIAL = f"{HUMPBACK4K_DIR}/M_Humpback4kSkinBake_v1"
+SKIN_BAKE_MATERIAL_TS = f"{HUMPBACK4K_DIR}/M_Humpback4kSkinBake_v2ts"     # run06 round 18: two-sided
+SKIN_BAKE_MATERIAL_P = f"{HUMPBACK4K_DIR}/M_Humpback4kSkinBake_v3p"       # run06 round 19: base-colour power curve
 
 
-def ensure_skin_bake_material():
+def ensure_skin_bake_material(two_sided: bool = False, power: bool = False):
     """run06 round 8: a skin graph whose roughness is set directly (RoughnessBase + texture * RoughnessTex) instead of the
     asset's near-zero roughness map times a scale (a mirror-like skin that shows the sky as a pale sheen), with
     BaseColorScale and Specular. Its values are baked into material instance assets per skin and wetness step
     (skin_bake_instance) and assigned when the whale actor is spawned: the per-actor sequencer material keys
     (wf_build_batch.key_wetness, bound to the mesh component without its actor) never reached the render."""
-    if unreal.EditorAssetLibrary.does_asset_exist(SKIN_BAKE_MATERIAL):
-        return unreal.EditorAssetLibrary.load_asset(SKIN_BAKE_MATERIAL)
+    # run06 round 18: two_sided = the same graph as a TWO-SIDED material (M_Humpback4kSkinBake_v2ts). The whale meshes come
+    # into the engine with their triangle winding reversed (the engine's normals point inward), so a one-sided material
+    # culls the near side and shows the inside of the far wall, lit through its inward normals; a two-sided material draws
+    # the nearest surface and flips its normal back to outward.
+    # run06 round 19: power = the same one-sided graph with the base colour bent by a power curve about a pivot,
+    # BaseColorPivot * (BaseColor / BaseColorPivot) ^ BaseColorPower (then BaseColorScale): with a power above 1 the dark
+    # skin darkens much more than the white pigment (a texel at the pivot keeps its value); M_Humpback4kSkinBake_v3p.
+    if power and two_sided:
+        raise RuntimeError("skin_bake: BaseColorPower is not built for the two-sided graph")
+    path = SKIN_BAKE_MATERIAL_P if power else (SKIN_BAKE_MATERIAL_TS if two_sided else SKIN_BAKE_MATERIAL)
+    if unreal.EditorAssetLibrary.does_asset_exist(path):
+        return unreal.EditorAssetLibrary.load_asset(path)
     ensure_humpback4k_materials()
     mel = unreal.MaterialEditingLibrary
     tools = unreal.AssetToolsHelpers.get_asset_tools()
     rough_tex = unreal.EditorAssetLibrary.load_asset(f"{HUMPBACK4K_DIR}/T_Humpback4k_Roughness")
     normal_tex = unreal.EditorAssetLibrary.load_asset(f"{HUMPBACK4K_DIR}/T_Humpback4k_Normal")
     base_tex = unreal.EditorAssetLibrary.load_asset(f"{HUMPBACK4K_DIR}/T_Humpback4k_BaseColor")
-    mat = tools.create_asset(SKIN_BAKE_MATERIAL.rsplit("/", 1)[1], HUMPBACK4K_DIR, unreal.Material, unreal.MaterialFactoryNew())
+    mat = tools.create_asset(path.rsplit("/", 1)[1], HUMPBACK4K_DIR, unreal.Material, unreal.MaterialFactoryNew())
+    if two_sided:
+        mat.set_editor_property("two_sided", True)
 
     def scalar(name, default, x, y):
         e = mel.create_material_expression(mat, unreal.MaterialExpressionScalarParameter, x, y)
@@ -1043,7 +1117,23 @@ def ensure_skin_bake_material():
     base.set_editor_property("parameter_name", "BaseColor"); base.set_editor_property("texture", base_tex)
     base.set_editor_property("sampler_type", unreal.MaterialSamplerType.SAMPLERTYPE_COLOR)
     bmul = mel.create_material_expression(mat, unreal.MaterialExpressionMultiply, -300, -250)
-    mel.connect_material_expressions(base, "RGB", bmul, "A"); mel.connect_material_expressions(scalar("BaseColorScale", 1.0, -600, -400), "", bmul, "B")
+    if power:
+        pivot = scalar("BaseColorPivot", 0.6, -900, -450)
+        bdiv = mel.create_material_expression(mat, unreal.MaterialExpressionDivide, -750, -300)
+        mel.connect_material_expressions(base, "RGB", bdiv, "A"); mel.connect_material_expressions(pivot, "", bdiv, "B")
+        bpow = mel.create_material_expression(mat, unreal.MaterialExpressionPower, -650, -300)
+        bpow.set_editor_property("const_exponent", 1.0)              # identity if the exponent pin stayed unhooked
+        exp_param = scalar("BaseColorPower", 1.0, -900, -350)
+        ok = mel.connect_material_expressions(bdiv, "", bpow, "Base")
+        ok = (mel.connect_material_expressions(exp_param, "", bpow, "Exp") or mel.connect_material_expressions(exp_param, "", bpow, "Exponent")) and ok
+        if not ok:
+            raise RuntimeError("skin bake power graph: the Power node's inputs did not connect")
+        bpiv = mel.create_material_expression(mat, unreal.MaterialExpressionMultiply, -500, -300)
+        mel.connect_material_expressions(bpow, "", bpiv, "A"); mel.connect_material_expressions(pivot, "", bpiv, "B")
+        mel.connect_material_expressions(bpiv, "", bmul, "A")       # base colour is clamped to [0, 1] by the engine
+    else:
+        mel.connect_material_expressions(base, "RGB", bmul, "A")
+    mel.connect_material_expressions(scalar("BaseColorScale", 1.0, -600, -400), "", bmul, "B")
     mel.connect_material_property(bmul, "", unreal.MaterialProperty.MP_BASE_COLOR)
     mel.connect_material_property(scalar("Specular", 0.5, -300, 0), "", unreal.MaterialProperty.MP_SPECULAR)
     rough = mel.create_material_expression(mat, unreal.MaterialExpressionTextureSample, -900, 150)
@@ -1061,26 +1151,161 @@ def ensure_skin_bake_material():
     errors = mel.recompile_material(mat)
     if errors:
         raise RuntimeError(f"skin bake material failed to compile: {errors}")
-    unreal.EditorAssetLibrary.save_asset(SKIN_BAKE_MATERIAL, only_if_is_dirty=False)
-    log("skin bake material made")
+    unreal.EditorAssetLibrary.save_asset(path, only_if_is_dirty=False)
+    log(f"skin bake material made {path}")
     return mat
 
 
-def skin_bake_instance(skin: str, params: dict):
-    """MI_H4kBake_<skin>_<hash>: the skin's base colour map on the bake graph with the scalar values baked in (cached)."""
+def skin_bake_instance(skin: str, params: dict, two_sided: bool = False):
+    """MI_H4kBake_<skin>_<hash>: the skin's base colour map on the bake graph with the scalar values baked in (cached).
+    run06 round 19: a BaseColorPower value selects the power-curve graph (instances MI_H4kBakeP_*); absent = as before."""
     import hashlib
+    power = "BaseColorPower" in params
     key = json.dumps({k: round(float(v), 3) for k, v in sorted(params.items())})
-    name = f"MI_H4kBake_{skin}_{hashlib.md5(key.encode()).hexdigest()[:8]}"
+    name = f"MI_H4kBake{'TS' if two_sided else ''}{'P' if power else ''}_{skin}_{hashlib.md5(key.encode()).hexdigest()[:8]}"
     path = f"{HUMPBACK4K_DIR}/{name}"
     if unreal.EditorAssetLibrary.does_asset_exist(path):
         return unreal.EditorAssetLibrary.load_asset(path)
-    parent = ensure_skin_bake_material()
+    parent = ensure_skin_bake_material(two_sided, power=power)
     mel = unreal.MaterialEditingLibrary
     inst = unreal.AssetToolsHelpers.get_asset_tools().create_asset(name, HUMPBACK4K_DIR, unreal.MaterialInstanceConstant,
                                                                      unreal.MaterialInstanceConstantFactoryNew())
     mel.set_material_instance_parent(inst, parent)
     tex_path = f"{HUMPBACK4K_DIR}/T_Humpback4k_BaseColor_{skin}" if skin != "00" else f"{HUMPBACK4K_DIR}/T_Humpback4k_BaseColor"
     mel.set_material_instance_texture_parameter_value(inst, "BaseColor", unreal.EditorAssetLibrary.load_asset(tex_path))
+    for k, v in params.items():
+        mel.set_material_instance_scalar_parameter_value(inst, k, float(v))
+    mel.update_material_instance(inst)
+    unreal.EditorAssetLibrary.save_asset(path, only_if_is_dirty=False)
+    log(f"{name}: {key}")
+    return inst
+
+
+DEBUG_FLAT_GREY = f"{HUMPBACK4K_DIR}/M_DebugFlatGrey"
+DEBUG_FACE_SIDE = f"{HUMPBACK4K_DIR}/M_DebugFaceSide"
+
+
+def debug_flat_grey_material():
+    """round 9 diagnosis (built in since round 18b; was debug_flat_grey.patch): a constant material (base colour 0.04 linear
+    grey, roughness 0.5, specular 0.5, no normal map, ONE-sided) for every whale slot (batch skin_bake._debug_flat_grey)."""
+    if unreal.EditorAssetLibrary.does_asset_exist(DEBUG_FLAT_GREY):
+        return unreal.EditorAssetLibrary.load_asset(DEBUG_FLAT_GREY)
+    mel = unreal.MaterialEditingLibrary
+    mat = unreal.AssetToolsHelpers.get_asset_tools().create_asset(DEBUG_FLAT_GREY.rsplit("/", 1)[1], HUMPBACK4K_DIR, unreal.Material,
+                                                                   unreal.MaterialFactoryNew())
+    col = mel.create_material_expression(mat, unreal.MaterialExpressionConstant3Vector, -400, 0)
+    col.set_editor_property("constant", unreal.LinearColor(0.04, 0.04, 0.04, 1.0))
+    mel.connect_material_property(col, "", unreal.MaterialProperty.MP_BASE_COLOR)
+    for prop, val, y in ((unreal.MaterialProperty.MP_ROUGHNESS, 0.5, 200), (unreal.MaterialProperty.MP_SPECULAR, 0.5, 300)):
+        c = mel.create_material_expression(mat, unreal.MaterialExpressionConstant, -400, y)
+        c.set_editor_property("r", val)
+        mel.connect_material_property(c, "", prop)
+    mel.recompile_material(mat)
+    unreal.EditorAssetLibrary.save_asset(DEBUG_FLAT_GREY, only_if_is_dirty=False)
+    return mat
+
+
+def debug_face_side_material():
+    """round 18b diagnosis (batch skin_bake._debug_face_side): unlit, TWO-sided; front faces red, back faces green
+    (TwoSidedSign), so a render shows which side of the triangles faces the camera on the nearest surface."""
+    if unreal.EditorAssetLibrary.does_asset_exist(DEBUG_FACE_SIDE):
+        return unreal.EditorAssetLibrary.load_asset(DEBUG_FACE_SIDE)
+    mel = unreal.MaterialEditingLibrary
+    mat = unreal.AssetToolsHelpers.get_asset_tools().create_asset(DEBUG_FACE_SIDE.rsplit("/", 1)[1], HUMPBACK4K_DIR, unreal.Material,
+                                                                   unreal.MaterialFactoryNew())
+    mat.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_UNLIT)
+    mat.set_editor_property("two_sided", True)
+    front = mel.create_material_expression(mat, unreal.MaterialExpressionConstant3Vector, -700, -100)
+    front.set_editor_property("constant", unreal.LinearColor(0.25, 0.0, 0.0, 1.0))
+    back = mel.create_material_expression(mat, unreal.MaterialExpressionConstant3Vector, -700, 0)
+    back.set_editor_property("constant", unreal.LinearColor(0.0, 0.25, 0.0, 1.0))
+    sign = mel.create_material_expression(mat, unreal.MaterialExpressionTwoSidedSign, -900, 150)
+    half = mel.create_material_expression(mat, unreal.MaterialExpressionConstant, -900, 250)
+    half.set_editor_property("r", 0.5)
+    mul = mel.create_material_expression(mat, unreal.MaterialExpressionMultiply, -700, 150)
+    mel.connect_material_expressions(sign, "", mul, "A"); mel.connect_material_expressions(half, "", mul, "B")
+    add = mel.create_material_expression(mat, unreal.MaterialExpressionAdd, -550, 150)
+    mel.connect_material_expressions(mul, "", add, "A"); mel.connect_material_expressions(half, "", add, "B")
+    lerp = mel.create_material_expression(mat, unreal.MaterialExpressionLinearInterpolate, -400, 0)
+    mel.connect_material_expressions(back, "", lerp, "A"); mel.connect_material_expressions(front, "", lerp, "B")
+    mel.connect_material_expressions(add, "", lerp, "Alpha")
+    mel.connect_material_property(lerp, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+    errors = mel.recompile_material(mat)
+    unreal.EditorAssetLibrary.save_asset(DEBUG_FACE_SIDE, only_if_is_dirty=False)
+    log(f"debug face-side material made (compile: {errors})")
+    return mat
+
+
+def seam20_debug_instance(skin: str, params: dict, mode: str):
+    """run06 round 20g diagnosis (batch skin_bake._debug_seam20 = "no_normal" | "flat_base"): the one-sided power bake graph
+    (M_Humpback4kSkinBake_v3p, same parameters) rebuilt as NEW assets M_Seam20Dbg_<mode> without the normal map
+    (no_normal) or with a constant base colour (flat_base: BaseColorFlat, default 0.03 linear grey, instead of the skin
+    map), instanced per skin and values (MI_Seam20Dbg_<mode>_<skin>_<hash>). Existing materials are not touched."""
+    import hashlib
+    assert mode in ("no_normal", "flat_base"), mode
+    mel = unreal.MaterialEditingLibrary
+    tools = unreal.AssetToolsHelpers.get_asset_tools()
+    mpath = f"{HUMPBACK4K_DIR}/M_Seam20Dbg_{mode}"
+    if unreal.EditorAssetLibrary.does_asset_exist(mpath):
+        mat = unreal.EditorAssetLibrary.load_asset(mpath)
+    else:
+        ensure_humpback4k_materials()
+        mat = tools.create_asset(mpath.rsplit("/", 1)[1], HUMPBACK4K_DIR, unreal.Material, unreal.MaterialFactoryNew())
+
+        def scalar(name, default, x, y):
+            e = mel.create_material_expression(mat, unreal.MaterialExpressionScalarParameter, x, y)
+            e.set_editor_property("parameter_name", name); e.set_editor_property("default_value", float(default))
+            return e
+        if mode == "flat_base":
+            src = scalar("BaseColorFlat", 0.03, -900, -250)
+        else:
+            src = mel.create_material_expression(mat, unreal.MaterialExpressionTextureSampleParameter2D, -1100, -250)
+            src.set_editor_property("parameter_name", "BaseColor")
+            src.set_editor_property("texture", unreal.EditorAssetLibrary.load_asset(f"{HUMPBACK4K_DIR}/T_Humpback4k_BaseColor"))
+            src.set_editor_property("sampler_type", unreal.MaterialSamplerType.SAMPLERTYPE_COLOR)
+        pivot = scalar("BaseColorPivot", 0.6, -900, -450)
+        bdiv = mel.create_material_expression(mat, unreal.MaterialExpressionDivide, -750, -300)
+        mel.connect_material_expressions(src, "" if mode == "flat_base" else "RGB", bdiv, "A"); mel.connect_material_expressions(pivot, "", bdiv, "B")
+        bpow = mel.create_material_expression(mat, unreal.MaterialExpressionPower, -650, -300)
+        bpow.set_editor_property("const_exponent", 1.0)
+        exp_param = scalar("BaseColorPower", 1.0, -900, -350)
+        mel.connect_material_expressions(bdiv, "", bpow, "Base")
+        mel.connect_material_expressions(exp_param, "", bpow, "Exp") or mel.connect_material_expressions(exp_param, "", bpow, "Exponent")
+        bpiv = mel.create_material_expression(mat, unreal.MaterialExpressionMultiply, -500, -300)
+        mel.connect_material_expressions(bpow, "", bpiv, "A"); mel.connect_material_expressions(pivot, "", bpiv, "B")
+        bmul = mel.create_material_expression(mat, unreal.MaterialExpressionMultiply, -300, -250)
+        mel.connect_material_expressions(bpiv, "", bmul, "A")
+        mel.connect_material_expressions(scalar("BaseColorScale", 1.0, -600, -400), "", bmul, "B")
+        mel.connect_material_property(bmul, "", unreal.MaterialProperty.MP_BASE_COLOR)
+        mel.connect_material_property(scalar("Specular", 0.5, -300, 0), "", unreal.MaterialProperty.MP_SPECULAR)
+        rough = mel.create_material_expression(mat, unreal.MaterialExpressionTextureSample, -900, 150)
+        rough.set_editor_property("texture", unreal.EditorAssetLibrary.load_asset(f"{HUMPBACK4K_DIR}/T_Humpback4k_Roughness"))
+        rough.set_editor_property("sampler_type", unreal.MaterialSamplerType.SAMPLERTYPE_LINEAR_GRAYSCALE)
+        rmul = mel.create_material_expression(mat, unreal.MaterialExpressionMultiply, -600, 150)
+        mel.connect_material_expressions(rough, "R", rmul, "A"); mel.connect_material_expressions(scalar("RoughnessTex", 0.15, -900, 350), "", rmul, "B")
+        radd = mel.create_material_expression(mat, unreal.MaterialExpressionAdd, -400, 150)
+        mel.connect_material_expressions(rmul, "", radd, "A"); mel.connect_material_expressions(scalar("RoughnessBase", 0.35, -600, 350), "", radd, "B")
+        mel.connect_material_property(radd, "", unreal.MaterialProperty.MP_ROUGHNESS)
+        if mode != "no_normal":
+            normal = mel.create_material_expression(mat, unreal.MaterialExpressionTextureSample, -600, 500)
+            normal.set_editor_property("texture", unreal.EditorAssetLibrary.load_asset(f"{HUMPBACK4K_DIR}/T_Humpback4k_Normal"))
+            normal.set_editor_property("sampler_type", unreal.MaterialSamplerType.SAMPLERTYPE_NORMAL)
+            mel.connect_material_property(normal, "RGB", unreal.MaterialProperty.MP_NORMAL)
+        errors = mel.recompile_material(mat)
+        if errors:
+            raise RuntimeError(f"seam20 debug material failed to compile: {errors}")
+        unreal.EditorAssetLibrary.save_asset(mpath, only_if_is_dirty=False)
+        log(f"seam20 debug material made {mpath}")
+    key = json.dumps({k: round(float(v), 3) for k, v in sorted(params.items())})
+    name = f"MI_Seam20Dbg_{mode}_{skin}_{hashlib.md5(key.encode()).hexdigest()[:8]}"
+    path = f"{HUMPBACK4K_DIR}/{name}"
+    if unreal.EditorAssetLibrary.does_asset_exist(path):
+        return unreal.EditorAssetLibrary.load_asset(path)
+    inst = tools.create_asset(name, HUMPBACK4K_DIR, unreal.MaterialInstanceConstant, unreal.MaterialInstanceConstantFactoryNew())
+    mel.set_material_instance_parent(inst, mat)
+    if mode != "flat_base":
+        tex_path = f"{HUMPBACK4K_DIR}/T_Humpback4k_BaseColor_{skin}" if skin != "00" else f"{HUMPBACK4K_DIR}/T_Humpback4k_BaseColor"
+        mel.set_material_instance_texture_parameter_value(inst, "BaseColor", unreal.EditorAssetLibrary.load_asset(tex_path))
     for k, v in params.items():
         mel.set_material_instance_scalar_parameter_value(inst, k, float(v))
     mel.update_material_instance(inst)
@@ -1121,7 +1346,13 @@ def spawn_whale_variant(shot: dict, label: str, hidden: bool = False, stencil: i
             if rs is not None:
                 lo, hi = skin_bake.get("wet_roughness", [0.25, 0.6])
                 params["RoughnessBase"] = round(min(max(float(rs), lo), hi) / 0.05) * 0.05
-            skin_material = skin_bake_instance(skin, params)
+            skin_material = skin_bake_instance(skin, params, two_sided=bool(skin_bake.get("_two_sided", False)))
+            if skin_bake.get("_debug_flat_grey"):
+                skin_material = debug_flat_grey_material()    # round 9 diagnosis: constant grey, no normal map
+            if skin_bake.get("_debug_seam20"):
+                skin_material = seam20_debug_instance(skin, params, skin_bake["_debug_seam20"])   # round 20g diagnosis
+            if skin_bake.get("_debug_face_side"):
+                skin_material = debug_face_side_material()    # round 18b diagnosis: front faces red, back faces green
         slots = [str(m.get_editor_property("material_slot_name")).lower() for m in mesh.get_editor_property("static_materials")]
         for slot, name in enumerate(slots):
             # OBJ groups body / eye (factory.humpback4k.write_obj); anything unnamed is body

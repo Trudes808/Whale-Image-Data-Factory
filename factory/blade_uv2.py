@@ -87,7 +87,8 @@ def _seam(L: np.ndarray) -> dict:
     """Blade-local indices of the left side's seam columns (leading and trailing edge) and of the tip, the chart they are
     copied into (right for the edge columns, left for the tip) and their chart coordinates there."""
     R = 2 * bl.NC
-    cols = np.concatenate([np.arange(bl.NL) * R + bl.NC, np.arange(bl.NL) * R + (R - 1)])
+    nl = (len(L) - 1) // R                     # round 12: the welded blade has its own number of levels
+    cols = np.concatenate([np.arange(nl) * R + bl.NC, np.arange(nl) * R + (R - 1)])
     tip = len(L) - 1
     st = np.concatenate([np.stack([L[cols, 0], L[cols, 2]], 1), [[-L[tip, 0], L[tip, 2]]]])
     return {"cols": cols, "tip": tip, "st": st, "side": np.concatenate([np.zeros(len(cols), int), [1]])}

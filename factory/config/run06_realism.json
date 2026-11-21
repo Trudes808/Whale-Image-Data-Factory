@@ -7,22 +7,22 @@
  "frames_per_shot": 3,
  "batch_size": 50,
  "pose_weights": {
-  "surface": 20,
-  "back_arch": 10,
+  "surface": 14,
+  "back_arch": 7,
   "logging": 5,
   "awash": 3,
   "blow_sliver": 2,
-  "blow": 3,
-  "peduncle": 12,
-  "fluke_rollout": 12,
-  "fluke_up": 11,
-  "fluke_sinking": 7,
-  "fluke_down": 3,
-  "pec_slap": 12,
-  "head_rise": 0.5,
-  "breach": 0.5,
-  "tail_slap": 1.5,
-  "peduncle_throw": 1,
+  "blow": 4,
+  "peduncle": 8,
+  "fluke_rollout": 31.4,
+  "fluke_up": 4.5,
+  "fluke_sinking": 2,
+  "fluke_down": 5.0,
+  "pec_slap": 9,
+  "head_rise": 0,
+  "breach": 0,
+  "tail_slap": 0.5,
+  "peduncle_throw": 0.5,
   "tail_stock": 0
  },
  "pose_jitter": {
@@ -40,7 +40,8 @@
    "surface": 1.0,
    "blow_sliver": 0.45,
    "awash": 0.3,
-   "fluke_down": 1.8
+   "fluke_down": 1.5,
+   "fluke_up": 1.2
   },
   "pitch_deg_by_category": {
    "surface": 4,
@@ -54,7 +55,11 @@
    "logging": 10,
    "blow": 12,
    "blow_sliver": 10,
-   "awash": 10
+   "awash": 10,
+   "fluke_rollout": 6,
+   "fluke_up": 8,
+   "fluke_sinking": 8,
+   "fluke_down": 8
   }
  },
  "no_whale_in_frame_fraction": 0.015,
@@ -161,8 +166,8 @@
    "vectors": {
     "Absorption": [
      0.7,
-     3.0,
-     8.1,
+     1.5,
+     4.05,
      8
     ],
     "Scattering": [
@@ -184,8 +189,8 @@
    "vectors": {
     "Absorption": [
      1.05,
-     4.2,
-     9.9,
+     2.1,
+     4.95,
      8
     ],
     "Scattering": [
@@ -207,8 +212,8 @@
    "vectors": {
     "Absorption": [
      0.84,
+     1.8,
      3.6,
-     7.2,
      8
     ],
     "Scattering": [
@@ -237,8 +242,8 @@
    12
   ],
   "overcast_intensity": [
-   1.5,
-   4.5
+   0.5,
+   1.0
   ],
   "fog_density": [
    0.0008,
@@ -273,6 +278,10 @@
     1,
     75
    ]
+  ],
+  "overcast_sun_elevation_deg": [
+   80,
+   88
   ]
  },
  "splash": {
@@ -343,7 +352,8 @@
   }
  },
  "labels": {
-  "through_water_depth_m": 1.5
+  "through_water_depth_m": 1.5,
+  "drop_isolated_instance_pixels": true
  },
  "whitewater": {
   "probability": 0.95,
@@ -354,7 +364,15 @@
   "calm_fraction": 0.1,
   "churn_scale": 0.1,
   "contact_boost": 1.3,
-  "foam_opacity": 0.35
+  "foam_opacity": 0.95,
+  "foam_lit": {
+   "mode": "TLM_SURFACE_PER_PIXEL_LIGHTING",
+   "emissive": [
+    0.35,
+    0.36,
+    0.38
+   ]
+  }
  },
  "skies": {
   "directory": "third_party_assets/skies",
@@ -403,7 +421,12 @@
   "dorsal_front_ratio": 7.0,
   "landmarks_v2": true,
   "blade_templates": "third_party_assets/humpback_4k/blade_templates.json",
-  "ridge_soften": 0.75
+  "blade_weld": 15,
+  "ridge_soften": 0.75,
+  "winding_fix": true,
+  "arch_bend": {
+   "neutral": 0.5
+  }
  },
  "companion": {
   "fraction": 0.18,
@@ -566,8 +589,8 @@
    3
   ],
   "adult_pose_weights": {
-   "surface": 30,
-   "back_arch": 22,
+   "surface": 40,
+   "back_arch": 12,
    "blow": 5,
    "logging": 8,
    "awash": 4,
@@ -576,7 +599,7 @@
    "fluke_down": 6,
    "fluke_edge": 4,
    "pec_up": 1.5,
-   "breach": 0.5
+   "breach": 0
   },
   "calf_pose_weights": {
    "surface": 30,
@@ -584,7 +607,7 @@
    "blow": 10,
    "logging": 15,
    "awash": 5,
-   "breach": 3,
+   "breach": 0,
    "fluke_up": 2
   },
   "calf_scale": [
@@ -617,12 +640,12 @@
  "realism": {
   "sequences": true,
   "exposure": {
-   "ev100": -2.6,
+   "ev100": 0.4,
    "jitter": 0.25,
    "sun_ref_elevation_deg": 46,
    "sun_weight": 0.5,
    "intensity_ref": 10.0,
-   "overcast_offset": 0.0,
+   "overcast_offset": 2.07,
    "bias": 0.0
   },
   "field_sensor_width_mm": 22.3,
@@ -682,34 +705,44 @@
     [
      140,
      220,
-     94
+     25
     ],
     [
-     60,
+     110,
      140,
-     3
+     25
     ],
     [
      220,
-     300,
-     3
+     250,
+     25
+    ],
+    [
+     40,
+     70,
+     12.5
+    ],
+    [
+     290,
+     320,
+     12.5
     ]
    ],
    "fluke_rollout": [
     [
-     140,
-     220,
-     88
+     150,
+     210,
+     82
     ],
     [
-     60,
-     140,
-     6
+     75,
+     105,
+     9
     ],
     [
-     220,
-     300,
-     6
+     255,
+     285,
+     9
     ]
    ],
    "tail_slap": [
@@ -745,10 +778,764 @@
      300,
      3
     ]
+   ],
+   "surface": [
+    [
+     195,
+     210,
+     24.3
+    ],
+    [
+     150,
+     165,
+     24.3
+    ],
+    [
+     15,
+     30,
+     12.2
+    ],
+    [
+     -30,
+     -15,
+     12.2
+    ],
+    [
+     210,
+     225,
+     74.7
+    ],
+    [
+     135,
+     150,
+     74.7
+    ],
+    [
+     30,
+     45,
+     37.3
+    ],
+    [
+     -45,
+     -30,
+     37.3
+    ],
+    [
+     225,
+     240,
+     41.7
+    ],
+    [
+     120,
+     135,
+     41.7
+    ],
+    [
+     45,
+     60,
+     20.8
+    ],
+    [
+     -60,
+     -45,
+     20.8
+    ],
+    [
+     240,
+     255,
+     50.0
+    ],
+    [
+     105,
+     120,
+     50.0
+    ],
+    [
+     60,
+     75,
+     25.0
+    ],
+    [
+     -75,
+     -60,
+     25.0
+    ],
+    [
+     255,
+     270,
+     134.7
+    ],
+    [
+     90,
+     105,
+     134.7
+    ],
+    [
+     75,
+     90,
+     67.3
+    ],
+    [
+     -90,
+     -75,
+     67.3
+    ]
+   ],
+   "back_arch": [
+    [
+     195,
+     210,
+     24.3
+    ],
+    [
+     150,
+     165,
+     24.3
+    ],
+    [
+     15,
+     30,
+     12.2
+    ],
+    [
+     -30,
+     -15,
+     12.2
+    ],
+    [
+     210,
+     225,
+     74.7
+    ],
+    [
+     135,
+     150,
+     74.7
+    ],
+    [
+     30,
+     45,
+     37.3
+    ],
+    [
+     -45,
+     -30,
+     37.3
+    ],
+    [
+     225,
+     240,
+     41.7
+    ],
+    [
+     120,
+     135,
+     41.7
+    ],
+    [
+     45,
+     60,
+     20.8
+    ],
+    [
+     -60,
+     -45,
+     20.8
+    ],
+    [
+     240,
+     255,
+     50.0
+    ],
+    [
+     105,
+     120,
+     50.0
+    ],
+    [
+     60,
+     75,
+     25.0
+    ],
+    [
+     -75,
+     -60,
+     25.0
+    ],
+    [
+     255,
+     270,
+     134.7
+    ],
+    [
+     90,
+     105,
+     134.7
+    ],
+    [
+     75,
+     90,
+     67.3
+    ],
+    [
+     -90,
+     -75,
+     67.3
+    ]
+   ],
+   "logging": [
+    [
+     195,
+     210,
+     24.3
+    ],
+    [
+     150,
+     165,
+     24.3
+    ],
+    [
+     15,
+     30,
+     12.2
+    ],
+    [
+     -30,
+     -15,
+     12.2
+    ],
+    [
+     210,
+     225,
+     74.7
+    ],
+    [
+     135,
+     150,
+     74.7
+    ],
+    [
+     30,
+     45,
+     37.3
+    ],
+    [
+     -45,
+     -30,
+     37.3
+    ],
+    [
+     225,
+     240,
+     41.7
+    ],
+    [
+     120,
+     135,
+     41.7
+    ],
+    [
+     45,
+     60,
+     20.8
+    ],
+    [
+     -60,
+     -45,
+     20.8
+    ],
+    [
+     240,
+     255,
+     50.0
+    ],
+    [
+     105,
+     120,
+     50.0
+    ],
+    [
+     60,
+     75,
+     25.0
+    ],
+    [
+     -75,
+     -60,
+     25.0
+    ],
+    [
+     255,
+     270,
+     134.7
+    ],
+    [
+     90,
+     105,
+     134.7
+    ],
+    [
+     75,
+     90,
+     67.3
+    ],
+    [
+     -90,
+     -75,
+     67.3
+    ]
+   ],
+   "blow": [
+    [
+     195,
+     210,
+     24.3
+    ],
+    [
+     150,
+     165,
+     24.3
+    ],
+    [
+     15,
+     30,
+     12.2
+    ],
+    [
+     -30,
+     -15,
+     12.2
+    ],
+    [
+     210,
+     225,
+     74.7
+    ],
+    [
+     135,
+     150,
+     74.7
+    ],
+    [
+     30,
+     45,
+     37.3
+    ],
+    [
+     -45,
+     -30,
+     37.3
+    ],
+    [
+     225,
+     240,
+     41.7
+    ],
+    [
+     120,
+     135,
+     41.7
+    ],
+    [
+     45,
+     60,
+     20.8
+    ],
+    [
+     -60,
+     -45,
+     20.8
+    ],
+    [
+     240,
+     255,
+     50.0
+    ],
+    [
+     105,
+     120,
+     50.0
+    ],
+    [
+     60,
+     75,
+     25.0
+    ],
+    [
+     -75,
+     -60,
+     25.0
+    ],
+    [
+     255,
+     270,
+     134.7
+    ],
+    [
+     90,
+     105,
+     134.7
+    ],
+    [
+     75,
+     90,
+     67.3
+    ],
+    [
+     -90,
+     -75,
+     67.3
+    ]
+   ],
+   "peduncle": [
+    [
+     195,
+     210,
+     24.3
+    ],
+    [
+     150,
+     165,
+     24.3
+    ],
+    [
+     15,
+     30,
+     12.2
+    ],
+    [
+     -30,
+     -15,
+     12.2
+    ],
+    [
+     210,
+     225,
+     74.7
+    ],
+    [
+     135,
+     150,
+     74.7
+    ],
+    [
+     30,
+     45,
+     37.3
+    ],
+    [
+     -45,
+     -30,
+     37.3
+    ],
+    [
+     225,
+     240,
+     41.7
+    ],
+    [
+     120,
+     135,
+     41.7
+    ],
+    [
+     45,
+     60,
+     20.8
+    ],
+    [
+     -60,
+     -45,
+     20.8
+    ],
+    [
+     240,
+     255,
+     50.0
+    ],
+    [
+     105,
+     120,
+     50.0
+    ],
+    [
+     60,
+     75,
+     25.0
+    ],
+    [
+     -75,
+     -60,
+     25.0
+    ],
+    [
+     255,
+     270,
+     134.7
+    ],
+    [
+     90,
+     105,
+     134.7
+    ],
+    [
+     75,
+     90,
+     67.3
+    ],
+    [
+     -90,
+     -75,
+     67.3
+    ]
+   ],
+   "awash": [
+    [
+     180,
+     195,
+     8.0
+    ],
+    [
+     165,
+     180,
+     8.0
+    ],
+    [
+     0,
+     15,
+     4.0
+    ],
+    [
+     -15,
+     0,
+     4.0
+    ],
+    [
+     195,
+     210,
+     24.3
+    ],
+    [
+     150,
+     165,
+     24.3
+    ],
+    [
+     15,
+     30,
+     12.2
+    ],
+    [
+     -30,
+     -15,
+     12.2
+    ],
+    [
+     210,
+     225,
+     74.7
+    ],
+    [
+     135,
+     150,
+     74.7
+    ],
+    [
+     30,
+     45,
+     37.3
+    ],
+    [
+     -45,
+     -30,
+     37.3
+    ],
+    [
+     225,
+     240,
+     41.7
+    ],
+    [
+     120,
+     135,
+     41.7
+    ],
+    [
+     45,
+     60,
+     20.8
+    ],
+    [
+     -60,
+     -45,
+     20.8
+    ],
+    [
+     240,
+     255,
+     50.0
+    ],
+    [
+     105,
+     120,
+     50.0
+    ],
+    [
+     60,
+     75,
+     25.0
+    ],
+    [
+     -75,
+     -60,
+     25.0
+    ],
+    [
+     255,
+     270,
+     134.7
+    ],
+    [
+     90,
+     105,
+     134.7
+    ],
+    [
+     75,
+     90,
+     67.3
+    ],
+    [
+     -90,
+     -75,
+     67.3
+    ]
+   ],
+   "blow_sliver": [
+    [
+     180,
+     195,
+     8.0
+    ],
+    [
+     165,
+     180,
+     8.0
+    ],
+    [
+     0,
+     15,
+     4.0
+    ],
+    [
+     -15,
+     0,
+     4.0
+    ],
+    [
+     195,
+     210,
+     24.3
+    ],
+    [
+     150,
+     165,
+     24.3
+    ],
+    [
+     15,
+     30,
+     12.2
+    ],
+    [
+     -30,
+     -15,
+     12.2
+    ],
+    [
+     210,
+     225,
+     74.7
+    ],
+    [
+     135,
+     150,
+     74.7
+    ],
+    [
+     30,
+     45,
+     37.3
+    ],
+    [
+     -45,
+     -30,
+     37.3
+    ],
+    [
+     225,
+     240,
+     41.7
+    ],
+    [
+     120,
+     135,
+     41.7
+    ],
+    [
+     45,
+     60,
+     20.8
+    ],
+    [
+     -60,
+     -45,
+     20.8
+    ],
+    [
+     240,
+     255,
+     50.0
+    ],
+    [
+     105,
+     120,
+     50.0
+    ],
+    [
+     60,
+     75,
+     25.0
+    ],
+    [
+     -75,
+     -60,
+     25.0
+    ],
+    [
+     255,
+     270,
+     134.7
+    ],
+    [
+     90,
+     105,
+     134.7
+    ],
+    [
+     75,
+     90,
+     67.3
+    ],
+    [
+     -90,
+     -75,
+     67.3
+    ]
    ]
   },
   "end_on": {
-   "fraction": 0.3,
+   "fraction": 0.03,
    "categories": [
     "surface",
     "back_arch",
@@ -758,14 +1545,14 @@
    ],
    "sectors": [
     [
-     155,
-     205,
-     65
+     165,
+     195,
+     2
     ],
     [
-     -25,
-     25,
-     35
+     -15,
+     15,
+     1
     ]
    ]
   },
@@ -785,8 +1572,8 @@
    ]
   },
   "ocean_scalars": {
-   "Water Specular": 0.08,
-   "Water Fresnel Specular": 0.08
+   "Water Specular": 0.18,
+   "Water Fresnel Specular": 0.18
   },
   "splash_by_body_part": true,
   "water": {
@@ -843,7 +1630,85 @@
    0.9,
    1.8
   ],
-  "mirror_views": true
+  "mirror_views": true,
+  "dive_blade_elev": [
+   -20.0,
+   -10.0,
+   10.0,
+   55.0,
+   75.0,
+   85.0,
+   88.0,
+   90.0
+  ],
+  "pec_slap": {
+   "pitch_deg": [
+    -2.0,
+    8.0
+   ],
+   "fluke_under_cm": 30.0
+  },
+  "surf_windows": {
+   "peduncle": [
+    0.75,
+    0.92
+   ]
+  },
+  "overcast_batch": {
+   "atmosphere": {
+    "sky_luminance_factor": [
+     6.4,
+     4.85,
+     3.88
+    ],
+    "mie_scattering_scale": 0.02,
+    "sky_light_intensity": 4.0
+   },
+   "fog_batch": {
+    "inscattering": [
+     0.2,
+     0.2,
+     0.21
+    ]
+   }
+  },
+  "rollout_bend": {
+   "arch_deg": [
+    -35,
+    -15
+   ],
+   "arch_centre": [
+    0.15,
+    0.25
+   ],
+   "arch_span": [
+    0.3,
+    0.45
+   ],
+   "tail_curl_deg": [
+    -15,
+    -3
+   ]
+  },
+  "overcast_ocean": {
+   "vectors": {
+    "Scattering": [
+     0.8,
+     0.9,
+     1.0,
+     0.3
+    ],
+    "Water Albedo": [
+     0.6,
+     0.7,
+     0.85,
+     0.5
+    ]
+   },
+   "scalars": {
+    "Water Roughness": 0.12
+   }
+  }
  },
  "storage": {
   "raw_frames": "last",
@@ -854,9 +1719,9 @@
   "rayleigh_scattering_scale": 0.0331,
   "mie_scattering_scale": 0.004,
   "sky_luminance_factor": [
-   0.34,
-   0.38,
-   0.52
+   1.2,
+   1.25,
+   1.5
   ]
  },
  "grade": {
@@ -880,7 +1745,7 @@
   ],
   "frame_L_mean": [
    31.5,
-   80.1
+   82.5
   ],
   "note": "round 7: the two p99 bounds are off for the measuring pilot (they removed a third of the shots, unevenly by category); mean-L*, white-water and hidden rules stay; round 8: water_L_min on the water's own L* (not the frame mean, which white water lifts)",
   "water_L_min": 28.0
@@ -888,9 +1753,9 @@
  "clouds": "off",
  "fog_batch": {
   "inscattering": [
-   0.07,
-   0.09,
-   0.125
+   0.64,
+   0.83,
+   1.15
   ]
  },
  "skin_look": {
@@ -898,13 +1763,16 @@
   "Specular": 0.2
  },
  "skin_bake": {
-  "Specular": 0.18,
+  "Specular": 0.3,
   "BaseColorScale": 1.0,
-  "RoughnessTex": 0.1,
+  "RoughnessTex": 0.08,
   "wet_roughness": [
-   0.32,
-   0.6
+   0.18,
+   0.4
   ],
-  "_note": "round 8: skin values baked into material instance assets at batch build (wf_shot.skin_bake_instance); the per-actor sequencer keys (skin_look, wetness) never reached the render; round 9: Specular 0.3 -> 0.18 and wet roughness floor 0.25 -> 0.32 (wet flukes facing the sky read white)"
+  "_note": "round 8: skin values baked into material instance assets at batch build (wf_shot.skin_bake_instance); the per-actor sequencer keys (skin_look, wetness) never reached the render; round 9: Specular 0.3 -> 0.18 and wet roughness floor 0.25 -> 0.32 (wet flukes facing the sky read white)",
+  "BaseColorPower": 1.1,
+  "BaseColorPivot": 0.6,
+  "_note_r19": "round 19 (light on the right surface, winding fixed): glossier wet skin (sharp glints, soft sky sheen) and the base colour bent by a power curve about 0.6 (BaseColorPower 1.1 since variant l, 2026-11-20 08:5x; j had 1.3 = dark skin x0.4, white pigment kept; graph M_Humpback4kSkinBake_v3p); see data/renders/r06_morning/HANDOVER.md Round 19"
  }
 }

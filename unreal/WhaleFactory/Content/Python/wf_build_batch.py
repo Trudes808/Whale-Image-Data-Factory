@@ -26,6 +26,12 @@ import unreal
 
 import wf_shot
 
+try:                                   # round 20f: boat rail / deck / land (factory.boat_scene); batches without it unchanged
+    import wf_boat20
+except Exception as _exc:              # never stop another batch over this optional module
+    wf_boat20 = None
+    unreal.log_warning(f"[wf_build_batch] wf_boat20 not loaded: {_exc}")
+
 MAP_PATH = "/Game/WhaleFactory/Maps/OceanPOC"
 SEQUENCE_PATH = "/Game/WhaleFactory/Sequences/LS_Batch"
 CONSTANT = unreal.MovieSceneKeyInterpolation.CONSTANT
@@ -220,6 +226,8 @@ def main() -> None:
     wf_shot.apply_islands(batch.get("islands"))
     wf_shot.clear_splash()
     wf_shot.clear_whale_variants()
+    if wf_boat20 is not None:          # round 20f: boat20 actors from an earlier batch (hidden by default) removed
+        wf_boat20.clear(delete_meshes=True)
 
     whale = wf_shot.find_actor(wf_shot.WHALE_LABEL)
     camera = wf_shot.find_actor(wf_shot.CAMERA_LABEL)
@@ -302,7 +310,10 @@ def main() -> None:
         wave_time = float(shot.get("wave_time_s", 0.0))
         cvar = cvars.add_section()
         cvar.set_range(start, start + per_shot)
-        cvar.set_from_string(f"r.Water.OverrideWavesTime={wave_time:.3f}")   # the same frozen time as DefaultEngine.ini (the track alone never reached the water)
+        cvar_text = f"r.Water.OverrideWavesTime={wave_time:.3f}"
+        if (shot.get("boat20") or {}).get("cvars"):    # round 20h: boat marker / corner shots only (round bokeh, blur cap); restored after the section
+            cvar_text += "," + ",".join(f"{k}={v}" for k, v in shot["boat20"]["cvars"].items())
+        cvar.set_from_string(cvar_text)   # the same frozen time as DefaultEngine.ini (the track alone never reached the water)
         surface = ride_waves(shot, waves, wave_time)
         variant = wf_shot.spawn_whale_variant(shot, shot["id"], hidden=True, skin_bake=batch.get("skin_bake"))
         whale_visibility = add_visibility_track(sequence.add_possessable(variant), total)
@@ -330,6 +341,10 @@ def main() -> None:
         whale_visibility.add_key(frame(0), False)
         whale_visibility.add_key(frame(start), True)
         whale_visibility.add_key(frame(start + per_shot), False)
+        if wf_boat20 is not None and (shot.get("boat20") or {}).get("content"):     # round 20f: this shot's boat / land
+            for actor in wf_boat20.spawn(shot):
+                vis = add_visibility_track(sequence.add_possessable(actor), total)
+                vis.add_key(frame(0), False); vis.add_key(frame(start), True); vis.add_key(frame(start + per_shot), False)
         key_transform(camera_channels, start, shot["camera"]["location"], shot["camera"]["rotation"])
         key_transform(sun_channels, start, [0.0, 0.0, 1000.0], {"roll": 0.0, "pitch": shot["sun"]["pitch"], "yaw": shot["sun"]["yaw"]})
         sky = shot.get("sky")
@@ -384,6 +399,8 @@ def main() -> None:
                 visibility.add_key(frame(start), True)
                 visibility.add_key(frame(start + per_shot), False)
                 sprite_total += 1
+    if wf_boat20 is not None and any(((s.get("boat20") or {}).get("grade")) for s in shots):   # round 20h: marker shots' picture style only
+        wf_boat20.key_marker_grade(cine_binding, shots, per_shot, total, batch.get("grade"), frame, CONSTANT)
     if not levels.save_current_level():
         raise RuntimeError("saving the level failed")
     unreal.EditorAssetLibrary.save_asset(SEQUENCE_PATH, only_if_is_dirty=False)

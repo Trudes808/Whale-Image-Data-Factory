@@ -22,6 +22,11 @@ echo "[$(date -u +%FT%TZ)] build_dataset: $run_dir count=$count seed=$seed"
 if [ ! -f "$run_dir/shotlist.jsonl" ]; then
     wf_python -m factory.shotlist "$config" "$mesh" -o "$run_dir" --count "$count" --seed "$seed"
 fi
+# run06 round 11/12: a run with the parametric dorsal blade may not start with a folding or open blade; with the welded
+# blade (round 12, whale.blade_weld) factory.weld_check also checks self-intersections, flips, slivers, stretch, shading
+# continuity at the junctions and manifoldness (it runs factory.blade_check for unwelded blades; exits 0 at once for runs
+# without a blade)
+wf_python -m factory.weld_check "$run_dir" --workers "${WF_POSTPROCESS_WORKERS:-8}" --json "$run_dir/blade_check.json"
 # Upper bound on disk: 3 frames x (RGB ~1 MiB + mask) per shot raw, plus the dataset copy.
 wf_python -m factory.diskguard check --path "$run_dir" --need-gib "$(( count * 5 / 1000 + 2 ))"
 "$WF_REPO_ROOT/tools/render_batch.sh" "$run_dir"
